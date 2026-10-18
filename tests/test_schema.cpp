@@ -73,7 +73,9 @@ class Schema : public Fixture {};
 
 /* What a declaration becomes, under the SQLite-like dialect. Every table of
  * backend.h, a value column per scalar at its stable column, a subject column
- * beside the personal one, the indexes the query form uses. */
+ * beside the personal one, the indexes the query form uses: the tables in the
+ * step's transaction, the indexes after it commits (AD-15), in the order of
+ * their records. */
 TEST_F(Schema, ANestedDeclarationYieldsTheDocumentedTables) {
   Open(sqlstub::StdDialect());
   ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.order", {Field("x", T)}));
@@ -82,7 +84,6 @@ TEST_F(Schema, ANestedDeclarationYieldsTheDocumentedTables) {
   std::vector<std::string> ddl = DdlSince(*rig.engine, from);
   const char * const want[] = {
       "CREATE TABLE IF NOT EXISTS \"t2_e\" (\"rid\" INTEGER NOT NULL, \"pid\" TEXT NOT NULL, \"creator\" TEXT, \"created\" INTEGER NOT NULL, \"rev\" INTEGER NOT NULL, \"last_item\" INTEGER NOT NULL, PRIMARY KEY (\"rid\"))",
-      "CREATE UNIQUE INDEX IF NOT EXISTS \"t2p\" ON \"t2_e\" (\"pid\")",
       "CREATE TABLE IF NOT EXISTS \"t2_s\" (\"rid\" INTEGER NOT NULL, \"seq\" INTEGER NOT NULL, \"pub\" INTEGER NOT NULL, \"del\" INTEGER NOT NULL, \"actor\" TEXT NOT NULL, \"at\" INTEGER NOT NULL, PRIMARY KEY (\"rid\", \"seq\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_r\" (\"rid\" INTEGER NOT NULL, \"rev\" INTEGER NOT NULL, \"cseq\" INTEGER NOT NULL, \"who\" TEXT NOT NULL, \"at\" INTEGER NOT NULL, \"why\" TEXT NOT NULL, PRIMARY KEY (\"rid\", \"rev\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_n\" (\"rid\" INTEGER NOT NULL, \"pub\" INTEGER NOT NULL, \"del\" INTEGER NOT NULL, PRIMARY KEY (\"rid\"))",
@@ -95,11 +96,20 @@ TEST_F(Schema, ANestedDeclarationYieldsTheDocumentedTables) {
       "CREATE TABLE IF NOT EXISTS \"t2_g3\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" INTEGER, \"v1\" TEXT, PRIMARY KEY (\"ent\", \"item\", \"vfrom\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_c3\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" INTEGER, \"v1\" TEXT, PRIMARY KEY (\"ent\", \"item\"))",
       "CREATE INDEX IF NOT EXISTS \"t2_i0_0\" ON \"t2_c0\" (\"v0\", \"ent\")",
+      "CREATE UNIQUE INDEX IF NOT EXISTS \"t2p\" ON \"t2_e\" (\"pid\")",
       "CREATE INDEX IF NOT EXISTS \"t2_j0_4\" ON \"t2_g0\" (\"v4s\")",
       "CREATE INDEX IF NOT EXISTS \"t2_i2_0\" ON \"t2_c2\" (\"v0\", \"ent\")",
   };
   std::vector<std::string> expect(std::begin(want), std::end(want));
   EXPECT_EQ(expect, ddl);
+  for (size_t i = from; i < rig.engine->log.size(); i++) {
+    const sqlstub::LogEntry & l = rig.engine->log[i];
+    if (IsIndexBuild(l.text)) {
+      EXPECT_FALSE(l.in_txn) << l.text;
+    } else if (IsDdl(l.text)) {
+      EXPECT_TRUE(l.in_txn) << l.text;
+    }
+  }
 }
 
 /* The schema steps live in the backend's type_store; the port skips it for an
@@ -392,6 +402,7 @@ TEST_F(Schema, AnotherDialectWritesTheSameSchemaInItsOwnWords) {
       }
     };
     swap("[s1].", "");
+    swap("CONCURRENTLY ", "");
     swap("[", "\"");
     swap("]", "\"");
     swap(" COLLATE \"C\"", "");
@@ -403,7 +414,8 @@ TEST_F(Schema, AnotherDialectWritesTheSameSchemaInItsOwnWords) {
   std::vector<std::string> raw;
   std::vector<std::string> mapped;
   for (const auto & t : fake_ddl) {
-    if (t.find("dss_") == std::string::npos) {
+    if (t.find("dss_") == std::string::npos &&
+        t.rfind("CREATE SCHEMA ", 0) != 0) {
       raw.push_back(t);
       mapped.push_back(normal(t));
     }
@@ -443,6 +455,276 @@ TEST_F(Schema, AStoreOfAnotherLayoutIsRefused) {
   EXPECT_EQ(GDEFSTOR_OK, fresh.abort(fresh.ctx, txn));
   fresh.destroy(fresh.ctx);
   EXPECT_EQ(0, rig.engine->open_conns);
+}
+
+/* ---- index builds (AD-15) ------------------------------------------------ */
+
+class Index : public Fixture {
+ protected:
+  int StateOf(const char * type, const char * path) {
+    int st = -1;
+    EXPECT_EQ(GDEFSTOR_OK, gdefstor_type_index_state(rig.store, kTenant, 2,
+        type, std::strlen(type), path, std::strlen(path), &st));
+    return st;
+  }
+  /* bucket = b: the public ids, in order. */
+  std::vector<std::string> Bucket(const char * b) {
+    V vb = Txt(b); /* ValueOf borrows its bytes: kept alive here */
+    GDEFSTOR_Value v = ValueOf(vb);
+    GDEFSTOR_QueryNode leaf;
+    std::memset(&leaf, 0, sizeof leaf);
+    leaf.op = GDEFSTOR_QUERY_EQ;
+    leaf.left.kind = GDEFSTOR_QUERY_FIELD;
+    leaf.left.field = "bucket";
+    leaf.left.field_len = 6;
+    leaf.right.kind = GDEFSTOR_QUERY_VALUES;
+    leaf.right.values = &v;
+    leaf.right.value_count = 1;
+    GDEFSTOR_Query q;
+    std::memset(&q, 0, sizeof q);
+    q.size = sizeof q;
+    q.where = &leaf;
+    q.limit = 100;
+    std::vector<std::string> ids;
+    uint64_t total = 0;
+    EXPECT_EQ(GDEFSTOR_OK, Ask(rig.store, "shop.box", q, &ids, &total));
+    EXPECT_EQ(ids.size(), total);
+    return ids;
+  }
+  void Fill3() {
+    for (int i = 0; i < 6; i++) {
+      Node n;
+      n.Set("bucket", Txt(i % 2 ? "odd" : "even")).Set("n", Num(I, i));
+      ASSERT_EQ(GDEFSTOR_OK, Put(rig.store, "shop.box", "b" + std::to_string(i),
+          n, 0, true));
+    }
+  }
+  size_t Builds(size_t from) const {
+    size_t n = 0;
+    for (size_t i = from; i < rig.engine->log.size(); i++) {
+      n += IsIndexBuild(rig.engine->log[i].text);
+    }
+    return n;
+  }
+};
+
+/* AD-15: a schema step's transaction never holds CREATE INDEX. Every index a
+ * declaration needs, a new type's and a new field's, and the tenant tables'
+ * own, is built outside every transaction, in both dialects; the engine
+ * refuses one inside (and counts it), so this also holds for every other
+ * test that declares a type. */
+TEST_F(Index, NoIndexIsBuiltInsideAStepTransaction) {
+  for (int fake = 0; fake < 2; fake++) {
+    sqlstub::Rig r;
+    ASSERT_EQ(GDEFSTOR_OK, sqlstub::OpenRig(r, fake ? sqlstub::FakeDialect()
+        : sqlstub::StdDialect(), fake != 0, nullptr));
+    ASSERT_EQ(GDEFSTOR_OK, Declare(r.store, "shop.order", Order()));
+    std::vector<F> more = Order();
+    more[1].flags |= IDX;
+    more.push_back(Field("note", T, IDX));
+    ASSERT_EQ(GDEFSTOR_OK, Declare(r.store, "shop.order", more));
+    size_t builds = 0;
+    for (const auto & l : r.engine->log) {
+      if (IsIndexBuild(l.text)) {
+        builds++;
+        EXPECT_FALSE(l.in_txn) << l.text;
+        EXPECT_EQ(fake != 0, l.text.find(" CONCURRENTLY ") != std::string::npos)
+            << l.text;
+      }
+    }
+    /* dss_type_tno, dss_entity_rid, t1p, number, lines.sku, email's
+     * subject, then total and note. */
+    EXPECT_EQ(8u, builds) << fake;
+    EXPECT_EQ(0, r.engine->index_builds_in_txn);
+    EXPECT_EQ(8u, r.engine->stores[kTenant].committed.indexes.size());
+    gdefstor_store_destroy(r.store);
+  }
+}
+
+/* A field reads "indexing" from its declaration until its build is done; a
+ * concurrent build that fails leaves an invalid index, which the next commit
+ * drops and builds again; queries answer the same throughout. */
+TEST_F(Index, AFailedConcurrentBuildIsDroppedAndBuiltAgain) {
+  Open(sqlstub::FakeDialect(), true);
+  ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.box",
+      {Field("bucket", T), Field("n", I)}));
+  Fill3();
+  const std::vector<std::string> even = {"b0", "b2", "b4"};
+  EXPECT_EQ(even, Bucket("even"));
+  EXPECT_EQ(GDEFSTOR_INDEX_NONE, StateOf("shop.box", "bucket"));
+  long discarded = rig.engine->discarded;
+  rig.engine->fail_index_build = 1;
+  ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.box",
+      {Field("bucket", T, IDX), Field("n", I)}));
+  EXPECT_EQ(0, rig.engine->fail_index_build) << "no build was tried";
+  auto & ix = rig.engine->stores[kTenant].committed.indexes;
+  ASSERT_EQ(1u, ix.count("t1_i0_0"));
+  EXPECT_FALSE(ix["t1_i0_0"].valid);
+  EXPECT_GT(rig.engine->discarded, discarded) << "the failed build's connection was kept";
+  EXPECT_EQ(GDEFSTOR_INDEX_INDEXING, StateOf("shop.box", "bucket"));
+  EXPECT_EQ(even, Bucket("even"));
+  /* The next commit of the tenant, whatever it writes. */
+  Node n;
+  n.Set("bucket", Txt("even")).Set("n", Num(I, 6));
+  ASSERT_EQ(GDEFSTOR_OK, Put(rig.store, "shop.box", "b6", n, 0, true));
+  EXPECT_EQ(1, rig.engine->invalid_drops);
+  ASSERT_EQ(1u, ix.count("t1_i0_0"));
+  EXPECT_TRUE(ix["t1_i0_0"].valid);
+  EXPECT_EQ(GDEFSTOR_INDEX_READY, StateOf("shop.box", "bucket"));
+  EXPECT_EQ((std::vector<std::string>{"b0", "b2", "b4", "b6"}), Bucket("even"));
+  EXPECT_EQ(0, rig.engine->index_builds_in_txn);
+}
+
+/* A plain build (SQLite's) that fails leaves no index: the field reads
+ * "indexing" and the next commit builds it. Nothing is dropped. */
+TEST_F(Index, AFailedPlainBuildIsBuiltAtTheNextCommit) {
+  Open(sqlstub::StdDialect());
+  ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.box",
+      {Field("bucket", T), Field("n", I)}));
+  Fill3();
+  rig.engine->fail_index_build = 1;
+  ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.box",
+      {Field("bucket", T, IDX), Field("n", I)}));
+  EXPECT_EQ(0u, rig.engine->stores[kTenant].committed.indexes.count("t1_i0_0"));
+  EXPECT_EQ(GDEFSTOR_INDEX_INDEXING, StateOf("shop.box", "bucket"));
+  EXPECT_EQ((std::vector<std::string>{"b1", "b3", "b5"}), Bucket("odd"));
+  ASSERT_EQ(GDEFSTOR_OK, State(rig.store, "b1", 1, 0));
+  EXPECT_EQ(1u, rig.engine->stores[kTenant].committed.indexes.count("t1_i0_0"));
+  EXPECT_EQ(GDEFSTOR_INDEX_READY, StateOf("shop.box", "bucket"));
+  EXPECT_EQ(0, rig.engine->invalid_drops);
+}
+
+/* A build left pending when a backend went away is taken up by the next
+ * backend's first write of the tenant. */
+TEST_F(Index, APendingBuildIsTakenUpByTheNextBackend) {
+  Open(sqlstub::FakeDialect(), true);
+  ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.box",
+      {Field("bucket", T), Field("n", I)}));
+  Fill3();
+  rig.engine->fail_index_build = 1;
+  ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.box",
+      {Field("bucket", T, IDX), Field("n", I)}));
+  EXPECT_EQ(GDEFSTOR_INDEX_INDEXING, StateOf("shop.box", "bucket"));
+  GDEFSSQL_Dialect d = sqlstub::FakeDialect();
+  GDEFSSQL_Executor x = sqlstub::ExecutorOf(rig.engine.get());
+  GDEFSTOR_ModelBackend fresh;
+  ASSERT_EQ(GDEFSSQL_OK, gdefssql_model_backend(&d, &x, nullptr, &fresh));
+  int st = -1;
+  GDEFSTOR_Type * type = nullptr;
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_type_get(rig.store, kTenant, 2, "shop.box",
+      8, &type));
+  size_t at = 0;
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_type_find(type, "bucket", 6, &at));
+  ASSERT_EQ(GDEFSTOR_OK, fresh.index_state(fresh.index_ctx, kTenant, 2, type,
+      at, &st));
+  EXPECT_EQ(GDEFSTOR_INDEX_INDEXING, st);
+  size_t from = Mark();
+  void * txn = nullptr;
+  ASSERT_EQ(GDEFSTOR_OK, fresh.begin(fresh.ctx, kTenant, 2, &txn));
+  ASSERT_EQ(GDEFSTOR_OK, fresh.abort(fresh.ctx, txn));
+  EXPECT_EQ(1u, Builds(from));
+  ASSERT_EQ(GDEFSTOR_OK, fresh.index_state(fresh.index_ctx, kTenant, 2, type,
+      at, &st));
+  EXPECT_EQ(GDEFSTOR_INDEX_READY, st);
+  EXPECT_EQ(1, rig.engine->invalid_drops);
+  gdefstor_type_free(type);
+  fresh.destroy(fresh.ctx);
+  EXPECT_EQ(GDEFSTOR_INDEX_READY, StateOf("shop.box", "bucket"));
+}
+
+/* An index the engine holds, valid, whose record still says pending (a
+ * backend that stopped between the build and its mark): the next sweep marks
+ * it built, and neither drops it nor builds it again. Dropping is for an
+ * invalid index only. */
+TEST_F(Index, AnIndexAlreadyBuiltIsMarkedAndNotDroppedOrRebuilt) {
+  Open(sqlstub::FakeDialect(), true);
+  ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.box",
+      {Field("bucket", T, IDX), Field("n", I)}));
+  EXPECT_EQ(GDEFSTOR_INDEX_READY, StateOf("shop.box", "bucket"));
+  /* What a backend that stopped after the build leaves: the record. */
+  auto & rows = rig.engine->stores[kTenant].committed.tables["dss_name"]->rows;
+  int reset = 0;
+  for (auto & row : rows) {
+    if (row[3] == sqlstub::Val::Int(9)) {
+      row[5] = sqlstub::Val::Int(0x200);
+      reset++;
+    }
+  }
+  ASSERT_EQ(1, reset);
+  EXPECT_EQ(GDEFSTOR_INDEX_INDEXING, StateOf("shop.box", "bucket"));
+  GDEFSSQL_Dialect d = sqlstub::FakeDialect();
+  GDEFSSQL_Executor x = sqlstub::ExecutorOf(rig.engine.get());
+  GDEFSTOR_ModelBackend fresh;
+  ASSERT_EQ(GDEFSSQL_OK, gdefssql_model_backend(&d, &x, nullptr, &fresh));
+  size_t from = Mark();
+  void * txn = nullptr;
+  ASSERT_EQ(GDEFSTOR_OK, fresh.begin(fresh.ctx, kTenant, 2, &txn));
+  ASSERT_EQ(GDEFSTOR_OK, fresh.abort(fresh.ctx, txn));
+  fresh.destroy(fresh.ctx);
+  EXPECT_EQ(0u, Builds(from));
+  EXPECT_EQ(0, rig.engine->invalid_drops);
+  for (const auto & ddl : DdlSince(*rig.engine, from)) {
+    EXPECT_EQ(std::string::npos, ddl.find("DROP")) << ddl;
+  }
+  EXPECT_EQ(GDEFSTOR_INDEX_READY, StateOf("shop.box", "bucket"));
+}
+
+/* Nothing pending, nothing built: an ordinary write after the declaration
+ * runs no build at all, and the tenant tables' indexes are built once. */
+TEST_F(Index, AWriteWithNothingPendingBuildsNothing) {
+  Open(sqlstub::StdDialect());
+  ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.box",
+      {Field("bucket", T, IDX), Field("n", I)}));
+  size_t from = Mark();
+  Fill3();
+  ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.box",
+      {Field("bucket", T, IDX), Field("n", I), Field("x", T)}));
+  EXPECT_EQ(0u, Builds(from));
+}
+
+/* gdefssql_store_exists(), for an executor whose missing store is a schema:
+ * no store before the tenant's first write, a data store after it, and a
+ * data store's schema refused as a key store. */
+TEST_F(Schema, AnExecutorCanAskWhetherAStoreExists) {
+  Open(sqlstub::FakeDialect(), true);
+  GDEFSSQL_Dialect d = sqlstub::FakeDialect();
+  GDEFSSQL_Executor x = sqlstub::ExecutorOf(rig.engine.get());
+  void * conn = nullptr;
+  const char * qual = nullptr;
+  ASSERT_EQ(GDEFSTOR_OK, x.open(x.ctx, kTenant, 2, 1, &conn, &qual));
+  ASSERT_NE(nullptr, qual);
+  int exists = 7;
+  ASSERT_EQ(GDEFSTOR_OK, gdefssql_store_exists(&d, &x, conn, qual,
+      GDEFSSQL_STORE_DATA, &exists));
+  EXPECT_EQ(0, exists);
+  x.close(x.ctx, conn, 0);
+  ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.box", {Field("n", I)}));
+  ASSERT_EQ(GDEFSTOR_OK, x.open(x.ctx, kTenant, 2, 0, &conn, &qual));
+  ASSERT_EQ(GDEFSTOR_OK, gdefssql_store_exists(&d, &x, conn, qual,
+      GDEFSSQL_STORE_DATA, &exists));
+  EXPECT_EQ(1, exists);
+  /* A data store's schema is not a key store, nor somewhere to make one. */
+  exists = 7;
+  EXPECT_EQ(GDEFSTOR_ERR_FORMAT, gdefssql_store_exists(&d, &x, conn, qual,
+      GDEFSSQL_STORE_KEYS, &exists));
+  EXPECT_EQ(7, exists);
+  EXPECT_EQ(GDEFSTOR_ERR_INVALID, gdefssql_store_exists(&d, &x, conn,
+      "Bad-Name", GDEFSSQL_STORE_DATA, &exists));
+  EXPECT_EQ(GDEFSTOR_ERR_INVALID, gdefssql_store_exists(&d, &x, conn, qual, 9,
+      &exists));
+  GDEFSSQL_Dialect none = sqlstub::StdDialect();
+  EXPECT_EQ(GDEFSTOR_ERR_INVALID, gdefssql_store_exists(&none, &x, conn, qual,
+      GDEFSSQL_STORE_DATA, &exists));
+  x.close(x.ctx, conn, 0);
+  int64_t v = 0;
+  ASSERT_EQ(GDEFSTOR_OK, x.open(x.ctx, kTenant, 2, 0, &conn, &qual));
+  ASSERT_EQ(GDEFSTOR_OK, x.exec(x.ctx, conn, d.begin_read,
+      std::strlen(d.begin_read)));
+  EXPECT_EQ(GDEFSTOR_OK, gdefssql_store_version(&d, &x, conn, qual,
+      GDEFSSQL_STORE_DATA, &v));
+  EXPECT_EQ(GDEFSSQL_SCHEMA_VERSION, v);
+  ASSERT_EQ(GDEFSTOR_OK, x.exec(x.ctx, conn, d.commit, std::strlen(d.commit)));
+  x.close(x.ctx, conn, 0);
 }
 
 class Executor : public Fixture {};
@@ -554,6 +836,11 @@ TEST(Dialect, CheckRefusesWhatCouldCorruptTheText) {
       {"binds", [](GDEFSSQL_Dialect & x) { x.max_binds = 998; }, GDEFSSQL_ERR_INVALID},
       {"columns", [](GDEFSSQL_Dialect & x) { x.max_columns = 15; }, GDEFSSQL_ERR_INVALID},
       {"DDL outside", [](GDEFSSQL_Dialect & x) { x.ddl_transactional = 0; }, GDEFSSQL_ERR_UNSUPPORTED},
+      {"a validity query and no drop", [](GDEFSSQL_Dialect & x) { x.index_valid = "SELECT"; x.index_drop = nullptr; }, GDEFSSQL_ERR_INVALID},
+      {"an empty drop", [](GDEFSSQL_Dialect & x) { x.index_valid = "SELECT"; x.index_drop = ""; }, GDEFSSQL_ERR_INVALID},
+      {"an empty schema statement", [](GDEFSSQL_Dialect & x) { x.qualifier_create = ""; }, GDEFSSQL_ERR_INVALID},
+      {"an empty store query", [](GDEFSSQL_Dialect & x) { x.store_exists = ""; }, GDEFSSQL_ERR_INVALID},
+      {"a build word that runs into a name", [](GDEFSSQL_Dialect & x) { x.index_build = "concurrently "; }, GDEFSSQL_ERR_INVALID},
   };
   for (const auto & b : bad) {
     GDEFSSQL_Dialect x = sqlstub::StdDialect();

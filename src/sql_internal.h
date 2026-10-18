@@ -83,12 +83,21 @@ enum {
   GDEFSSQL_ROLE_VALUE = 7,   /* column vC of tN_gG and tN_cG */
   GDEFSSQL_ROLE_SUBJECT = 8, /* column vCs of the same */
   GDEFSSQL_ROLE_INDEX = 9,   /* tN_iG_C on tN_cG (vC, ent) */
-  GDEFSSQL_ROLE_SUBJECT_INDEX = 10 /* tN_jG_C on tN_gG (vCs) */
+  GDEFSSQL_ROLE_SUBJECT_INDEX = 10, /* tN_jG_C on tN_gG (vCs) */
+  GDEFSSQL_ROLE_ENTITY_INDEX = 11,  /* tNp, unique on tN_e (pid) */
+  /* tno 0: the tenant tables' own, col 0 dss_type_tno (unique, dss_type
+   * (tno)), col 1 dss_entity_rid (unique, dss_entity (rid)) */
+  GDEFSSQL_ROLE_TENANT_INDEX = 12
 };
 
 /* dss_name.kind of a VALUE column: the field's logical type, plus this bit
  * for a personal field (whose value column holds ciphertext). */
 #define GDEFSSQL_KIND_PERSONAL 0x100
+
+/* dss_name.kind of an index row (roles INDEX to TENANT_INDEX): 0 when it is
+ * built, this while it waits to be built after its step (AD-15). No value
+ * column's kind reaches it. */
+#define GDEFSSQL_KIND_PENDING 0x200
 
 /* A generated name: `[a-z][a-z0-9_]*`, at most @p cap bytes. This is the only
  * shape that may reach SQL text as an identifier. */

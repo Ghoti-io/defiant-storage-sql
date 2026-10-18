@@ -71,7 +71,26 @@
  * `begin_read`, so a query's total and its page come from one snapshot.
  * Schema steps of `type_store` run inside the write (the dialect must have
  * transactional DDL). The first write of a tenant in a backend's life first
- * creates the six tenant tables in a transaction of their own.
+ * creates the six tenant tables in a transaction of their own (and, with
+ * GDEFSSQL_Dialect::qualifier_create, the tenant's schema, first).
+ *
+ * ## Index builds
+ *
+ * No `CREATE INDEX` runs inside a transaction (AD-15). A step that needs an
+ * index records it in `dss_name` as pending, in the step's transaction, and
+ * the index is built after that transaction commits, on the same connection:
+ * with GDEFSSQL_Dialect::index_build (`CREATE INDEX CONCURRENTLY` on
+ * Postgres), or plainly (SQLite). It is marked built, in a short transaction
+ * of its own, only once it exists and, with GDEFSSQL_Dialect::index_valid, is
+ * valid. An invalid index, which a failed concurrent build leaves behind, is
+ * dropped with GDEFSSQL_Dialect::index_drop and built again; that is the one
+ * drop this library writes. A build that fails leaves its index pending and
+ * the commit that ran it succeeds: the declaration is committed. Pending
+ * builds are tried again after the backend's next commit of that tenant, and
+ * on the first write of the tenant in a later backend's life. Until an index
+ * is built its field reads ::GDEFSTOR_INDEX_INDEXING through
+ * gdefstor_type_index_state(), and every query on it answers the same, by
+ * reading the table.
  *
  * ## What it refuses
  *
@@ -149,6 +168,33 @@ typedef enum GDEFSSQL_StoreKind {
 GDEFSSQL_API GDEFSTOR_Result gdefssql_store_version(
     const GDEFSSQL_Dialect * dialect, const GDEFSSQL_Executor * executor,
     void * conn, const char * qualifier, int kind, int64_t * out_version);
+
+/**
+ * @brief Whether a tenant's store exists, for an executor whose `open` cannot
+ * see a missing store any other way (a Postgres schema), so that a read of a
+ * tenant with no store is answered by no connection, as executor.h asks.
+ *
+ * It runs GDEFSSQL_Dialect::store_exists through @p executor on @p conn, with
+ * the qualifier and the version table of @p kind as its parameters, outside
+ * any transaction the caller has not opened; nothing is written. An executor
+ * that finds the store calls gdefssql_store_version() next and refuses a
+ * version that is not this library's.
+ *
+ * @param qualifier What `open` would return as the qualifier: required.
+ * @param kind A ::GDEFSSQL_StoreKind.
+ * @param out_exists Receives 1 when the store's version table exists, 0 when
+ *   there is no schema or an empty one (the first write makes the store in
+ *   it). Not written on failure.
+ * @return ::GDEFSTOR_OK, ::GDEFSTOR_ERR_FORMAT (a schema that holds tables
+ *   but not this kind's version table: not a store of this kind, never to be
+ *   written in), ::GDEFSTOR_ERR_INVALID (a NULL argument, an unknown kind, a
+ *   qualifier that is not a generated name, a dialect that
+ *   gdefssql_dialect_check() refuses or that has no store_exists), or the
+ *   executor's error.
+ */
+GDEFSSQL_API GDEFSTOR_Result gdefssql_store_exists(
+    const GDEFSSQL_Dialect * dialect, const GDEFSSQL_Executor * executor,
+    void * conn, const char * qualifier, int kind, int * out_exists);
 
 #ifdef __cplusplus
 }

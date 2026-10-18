@@ -1,7 +1,9 @@
 # The SQL layer
 
 **Status:** describes what shipped in story S2 (2026-10-18), with the key
-store and `gdefssql_store_version()` added in story S3.
+store and `gdefssql_store_version()` added in story S3, and index builds
+outside the step, schemas made per tenant and `gdefssql_store_exists()` in
+story S4.
 
 This is the contract between `defiant-storage-sql` and the engine backends
 that sit on it. The port's meaning is `defiant-storage`'s
@@ -39,8 +41,11 @@ and, for a tenant with a qualifier (a Postgres schema), written after it.
 `dss_name (tno, grp, col, role, name, kind)` maps every generated table,
 column and index to what it holds: `role` is 1 entity, 2 state, 3 revision,
 4 newest state, 5 item versions, 6 current items, 7 value column, 8 subject
-column, 9 field index, 10 subject index; `kind` is a value column's logical
-type, plus 256 for a personal field.
+column, 9 field index, 10 subject index, 11 the entity lookup `tNp`, 12 one
+of the tenant tables' two indexes (`tno` 0; `col` 0 `dss_type_tno`, 1
+`dss_entity_rid`); `kind` is a value column's logical type, plus 256 for a
+personal field, and an index's 0 once it is built, 512 while it is pending
+(section 3).
 
 ## 2. Tables
 
@@ -108,8 +113,41 @@ checks `dss_schema.version`: another version is refused
 The steps of a declaration run inside the write that declares it, so a dialect
 must have transactional DDL (SQLite and Postgres do). A dialect without it is
 refused: running and recording each step apart, as MySQL would need, is not
-built. Postgres's `CREATE INDEX CONCURRENTLY` (AD-15) cannot run inside a
-transaction either; S4 decides whether index creation moves out of the write.
+built.
+
+**Indexes are the exception (AD-15): no `CREATE INDEX` of a data store runs
+inside a transaction.** An index's step only records it, pending (`kind`
+512), in the declaring write. After that write commits, on the same
+connection and outside any transaction, every pending index of the tenant is
+built:
+
+```
+CREATE [UNIQUE] INDEX <index_build>IF NOT EXISTS i ON t (c, ...)
+```
+
+with the dialect's `index_build` word (`CONCURRENTLY ` on Postgres; none on
+SQLite), and then marked built (`kind` 0) in a short transaction of its own,
+once it exists and, where the dialect has `index_valid`, the engine says it is
+valid. A concurrent build that fails leaves an invalid index; the next sweep
+finds it with `index_valid`, drops it with `index_drop` (`DROP INDEX
+CONCURRENTLY IF EXISTS`) and builds it again. That is the only drop this
+library writes, and only of an index the engine says is invalid: such an index
+holds nothing and serves no query. An index that is valid but still recorded
+pending (a backend stopped between the build and the mark) is marked, never
+dropped or built again.
+
+A failed build is not the declaring write's failure: the write is committed,
+the build's connection is discarded, and the index stays pending. Pending
+builds are tried again after the backend's next commit of the tenant and on
+the first write of the tenant in every backend's life. The tenant tables' two
+indexes and each type's `tNp` are recorded and built the same way. Until an
+index is built its field reads `GDEFSTOR_INDEX_INDEXING`
+(`gdefstor_type_index_state()`, answered from `dss_name`), and queries on it
+answer exactly the same, by reading the table.
+
+The key store (section 8) is a port of its own: its one index,
+`dsk_ledger_seq`, is made with its table in the key store's first
+transaction, when that table is new and empty.
 
 ## 4. Statements
 
@@ -130,9 +168,12 @@ SELECT COUNT(*) FROM ...
 
 | Operation | Statements |
 | --- | --- |
-| `begin` | `begin_write` (first time per tenant: the tenant tables first) |
+| `begin` | `begin_write` (first time per tenant: the tenant tables first, then the index sweep) |
 | `type_load` | `SELECT decl FROM dss_type WHERE name = ?` |
-| `type_store` | the type number, the upserted declaration, the steps |
+| `type_store` | the type number, the upserted declaration, the steps (indexes recorded pending) |
+| `commit` | the dialect's `commit`; then, when a step recorded an index or one is still pending, the index sweep (section 3) |
+| index sweep | in a write transaction: `SELECT tno, grp, col, role FROM dss_name WHERE kind = ?` and `index_valid` per index; outside one: `index_drop` of an invalid index, `CREATE INDEX`; in a write transaction: `index_valid`, `UPDATE dss_name SET kind = ? WHERE tno = ? AND grp = ? AND col = ? AND role = ?` |
+| `index_state` | `dss_type` by name, then `dss_name` of the type, in a read |
 | `entity_find` | `dss_entity` by `pid`, then `tN_e JOIN tN_n` by `rid` |
 | `entity_insert` | the row counter; `tN_e`, `tN_n`, `dss_entity` rows |
 | `state_append` | the last `seq`; a `tN_s` row; `tN_n` updated |
@@ -208,7 +249,12 @@ What S3 (SQLite) and S4 (Postgres) supply, and what they must know:
   `$` numbered, `BIGINT`/`DOUBLE PRECISION`/`TEXT`/`BYTEA` (and `SMALLINT` or
   `BIGINT` for BOOLEAN, which is bound as an int64), `COLLATE "C"`,
   `nulls_low` 0, ON CONFLICT, `RETURNING`, a serializable `begin_write` and a
-  repeatable-read read-only `begin_read`.
+  repeatable-read read-only `begin_read`; and the S4 members: `index_build`
+  `CONCURRENTLY `, `index_valid` (a catalog query on `pg_index.indisvalid`),
+  `index_drop`, `qualifier_create` `CREATE SCHEMA IF NOT EXISTS `, and
+  `store_exists` (a catalog query: whether the schema exists, has the
+  version table, and how many tables it holds).
+  SQLite leaves all five NULL.
 - **The executor.** One connection per call is what the library asks for;
   pooling, statement caching by text (texts repeat exactly per tenant and
   shape) and discarding a connection closed with `discard` are the
@@ -234,7 +280,15 @@ What S3 (SQLite) and S4 (Postgres) supply, and what they must know:
   through the executor itself. A store this library did not make (SQLite: a
   milestone-1 file, with `defiant_record` and no `dss_schema`) is the
   executor's to recognise from the catalog and refuse, before anything here
-  can create a table in it.
+  can create a table in it. An executor whose missing store is a schema, not
+  a file, calls `gdefssql_store_exists()` in `open` (the dialect's
+  `store_exists`, one `SELECT`) to answer a read of a tenant with no store
+  with no connection, as executor.h asks; a schema that holds tables but not
+  the version table is `GDEFSTOR_ERR_FORMAT`, never written in.
+- **Index builds run on the write connection after its commit**, outside any
+  transaction, and may wait (a concurrent build waits for older
+  transactions): the executor's session settings (Postgres: `lock_timeout`)
+  bound that wait, and a build that gives up only leaves its index pending.
 - **Not here:** blind indexes (S5), content-hash values (AD-14, later), and
   the old key/bytes tables (the backends keep them until S9).
 

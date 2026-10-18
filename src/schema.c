@@ -30,6 +30,11 @@
  * recorded in dss_name in the same transaction as its DDL, and a step whose
  * record exists is not taken, so declaring the same tree twice runs no DDL.
  * Tables and indexes are also written IF NOT EXISTS.
+ *
+ * An index is the exception to "in the same transaction" (AD-15): its step
+ * only records it, as pending, and gdefssql_index_sweep() builds it after the
+ * step's transaction commits, outside any transaction, and then marks it
+ * built. No CREATE INDEX of a data store ever runs inside a transaction.
  */
 
 #include <ghoti.io/defiant-storage-sql/macros.h>
@@ -38,6 +43,69 @@
 #include <ghoti.io/cutil/allocator.h>
 #include <stdio.h>
 #include <string.h>
+
+static GDEFSTOR_Result record(GDEFSSQL_Cx * c, uint32_t tno, uint32_t grp,
+    uint32_t col, int role, const char * name, int kind);
+static const GDEFSSQL_CatRow * have(const GDEFSSQL_Cat * cat, uint32_t grp,
+    uint32_t col, int role);
+
+/* What one recorded index is on: derived from its record's numbers, never
+ * from the name the record holds. */
+typedef struct IndexDef {
+  char index[GDEFSSQL_NAME_CAP];
+  char table[GDEFSSQL_NAME_CAP];
+  char col[GDEFSSQL_NAME_CAP];
+  const char * cols[2];
+  size_t ncols;
+  int unique;
+} IndexDef;
+
+/* 0 for a role that is no index. */
+static int index_of(uint32_t tno, uint32_t grp, uint32_t col, int role,
+    IndexDef * out) {
+  memset(out, 0, sizeof *out);
+  switch (role) {
+  case GDEFSSQL_ROLE_INDEX:
+    /* What a filter on the field reads: matching current items, then their
+     * entity. */
+    gdefssql_name_index(out->index, tno, role, grp, col);
+    gdefssql_name_table(out->table, tno, GDEFSSQL_ROLE_CURRENT, grp);
+    gdefssql_name_column(out->col, col, 0);
+    out->cols[0] = out->col;
+    out->cols[1] = "ent";
+    out->ncols = 2;
+    return 1;
+  case GDEFSSQL_ROLE_SUBJECT_INDEX:
+    /* "Everything about this person": every version naming the subject. */
+    gdefssql_name_index(out->index, tno, role, grp, col);
+    gdefssql_name_table(out->table, tno, GDEFSSQL_ROLE_GROUP, grp);
+    gdefssql_name_column(out->col, col, 1);
+    out->cols[0] = out->col;
+    out->ncols = 1;
+    return 1;
+  case GDEFSSQL_ROLE_ENTITY_INDEX:
+    snprintf(out->index, sizeof out->index, "t%lup", (unsigned long)tno);
+    gdefssql_name_table(out->table, tno, GDEFSSQL_ROLE_ENTITY, 0);
+    out->cols[0] = "pid";
+    out->ncols = 1;
+    out->unique = 1;
+    return grp == 0 && col == 0;
+  case GDEFSSQL_ROLE_TENANT_INDEX:
+    if (tno != 0 || grp != 0 || col > 1) {
+      return 0;
+    }
+    snprintf(out->index, sizeof out->index, "%s",
+        col == 0 ? "dss_type_tno" : "dss_entity_rid");
+    snprintf(out->table, sizeof out->table, "%s",
+        col == 0 ? "dss_type" : "dss_entity");
+    out->cols[0] = col == 0 ? "tno" : "rid";
+    out->ncols = 1;
+    out->unique = 1;
+    return 1;
+  default:
+    return 0;
+  }
+}
 
 typedef struct ColDef {
   const char * name;
@@ -98,8 +166,13 @@ static GDEFSTOR_Result create_index(GDEFSSQL_Cx * c, int unique,
   GDEFSTOR_Result rc;
   size_t i;
   gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
-  gdefssql_sb_kw(&sb, unique ? "CREATE UNIQUE INDEX IF NOT EXISTS "
-                             : "CREATE INDEX IF NOT EXISTS ");
+  gdefssql_sb_kw(&sb, unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
+  if (c->b->d.index_build != NULL) {
+    /* The dialect's own word: CONCURRENTLY, so that the build takes no lock
+     * that blocks the table's writers (AD-15). */
+    gdefssql_sb_kw(&sb, c->b->d.index_build);
+  }
+  gdefssql_sb_kw(&sb, "IF NOT EXISTS ");
   /* An index lives in its table's schema: Postgres takes no qualifier on
    * the index name, so it is written bare. */
   gdefssql_sb_ident(&sb, index);
@@ -170,14 +243,24 @@ GDEFSTOR_Result gdefssql_tenant_init(GDEFSSQL_Cx * c) {
       {"body", GDEFSSQL_COL_BYTES, 1}};
   static const char * const id_key[] = {"id"};
   static const char * const name_key[] = {"name"};
-  static const char * const tno_key[] = {"tno"};
   static const char * const names_key[] = {"tno", "grp", "col", "role"};
   static const char * const pid_key[] = {"pid"};
-  static const char * const rid_key[] = {"rid"};
-  GDEFSTOR_Result rc;
+  GDEFSTOR_Result rc = GDEFSTOR_OK;
   int64_t v = 0;
   int found = 0;
-  rc = create_table(c, "dss_schema", schema_cols, 2, id_key, 1);
+  if (c->qual != NULL && c->b->d.qualifier_create != NULL) {
+    /* The tenant's schema, in the same transaction as its tables: a failure
+     * leaves neither, never a schema that holds no store. */
+    GDEFSSQL_Sb sb;
+    gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, NULL);
+    gdefssql_sb_kw(&sb, c->b->d.qualifier_create);
+    gdefssql_sb_ident(&sb, c->qual);
+    rc = gdefssql_cx_exec(c, &sb);
+    gdefssql_sb_free(&sb);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = create_table(c, "dss_schema", schema_cols, 2, id_key, 1);
+  }
   if (rc == GDEFSTOR_OK) {
     rc = create_table(c, "dss_counter", counter_cols, 4, id_key, 1);
   }
@@ -185,16 +268,10 @@ GDEFSTOR_Result gdefssql_tenant_init(GDEFSSQL_Cx * c) {
     rc = create_table(c, "dss_type", type_cols, 3, name_key, 1);
   }
   if (rc == GDEFSTOR_OK) {
-    rc = create_index(c, 1, "dss_type_tno", "dss_type", tno_key, 1);
-  }
-  if (rc == GDEFSTOR_OK) {
     rc = create_table(c, "dss_name", name_cols, 6, names_key, 4);
   }
   if (rc == GDEFSTOR_OK) {
     rc = create_table(c, "dss_entity", entity_cols, 3, pid_key, 1);
-  }
-  if (rc == GDEFSTOR_OK) {
-    rc = create_index(c, 1, "dss_entity_rid", "dss_entity", rid_key, 1);
   }
   if (rc == GDEFSTOR_OK) {
     rc = create_table(c, "dss_draft", draft_cols, 4, pid_key, 1);
@@ -247,6 +324,21 @@ GDEFSTOR_Result gdefssql_tenant_init(GDEFSSQL_Cx * c) {
     gdefssql_sb_kw(&sb, ")");
     rc = gdefssql_cx_run(c, &sb);
     gdefssql_sb_free(&sb);
+  }
+  if (rc == GDEFSTOR_OK) {
+    /* The tenant tables' two indexes are steps like any other: recorded
+     * here, built after this transaction commits (AD-15). */
+    static const char * const names[2] = {"dss_type_tno", "dss_entity_rid"};
+    GDEFSSQL_Cat cat;
+    uint32_t k;
+    rc = gdefssql_cat_load(c, 0, &cat);
+    for (k = 0; rc == GDEFSTOR_OK && k < 2; k++) {
+      if (have(&cat, 0, k, GDEFSSQL_ROLE_TENANT_INDEX) == NULL) {
+        rc = record(c, 0, 0, k, GDEFSSQL_ROLE_TENANT_INDEX, names[k],
+            GDEFSSQL_KIND_PENDING);
+      }
+    }
+    gdefssql_cat_free(&cat); /* zeroed by a failed load: freeing is safe */
   }
   return rc;
 }
@@ -440,6 +532,9 @@ static GDEFSTOR_Result record(GDEFSSQL_Cx * c, uint32_t tno, uint32_t grp,
   gdefssql_sb_kw(&sb, ")");
   rc = gdefssql_cx_run(c, &sb);
   gdefssql_sb_free(&sb);
+  if (rc == GDEFSTOR_OK && kind == GDEFSSQL_KIND_PENDING) {
+    c->pending = 1;
+  }
   return rc;
 }
 
@@ -462,7 +557,6 @@ static GDEFSTOR_Result type_tables(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
   static const char * const rid_key[] = {"rid"};
   static const char * const seq_key[] = {"rid", "seq"};
   static const char * const rev_key[] = {"rid", "rev"};
-  static const char * const pid_col[] = {"pid"};
   struct {
     int role;
     const ColDef * cols;
@@ -482,18 +576,20 @@ static GDEFSTOR_Result type_tables(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
     }
     gdefssql_name_table(name, tno, t[i].role, 0);
     rc = create_table(c, name, t[i].cols, t[i].n, t[i].key, t[i].nkey);
-    if (rc == GDEFSTOR_OK && t[i].role == GDEFSSQL_ROLE_ENTITY) {
-      /* The entity lookup by public id, which ENTITY operands use. */
-      char index[GDEFSSQL_NAME_CAP];
-      snprintf(index, sizeof index, "t%lup", (unsigned long)tno);
-      rc = create_index(c, 1, index, name, pid_col, 1);
-    }
     if (rc == GDEFSTOR_OK) {
       rc = record(c, tno, 0, 0, t[i].role, name, 0);
     }
     if (rc != GDEFSTOR_OK) {
       return rc;
     }
+  }
+  if (have(cat, 0, 0, GDEFSSQL_ROLE_ENTITY_INDEX) == NULL) {
+    /* The entity lookup by public id, which ENTITY operands use: recorded
+     * here and built after the step commits (AD-15). */
+    char index[GDEFSSQL_NAME_CAP];
+    snprintf(index, sizeof index, "t%lup", (unsigned long)tno);
+    return record(c, tno, 0, 0, GDEFSSQL_ROLE_ENTITY_INDEX, index,
+        GDEFSSQL_KIND_PENDING);
   }
   return GDEFSTOR_OK;
 }
@@ -625,33 +721,14 @@ static GDEFSTOR_Result add_column(GDEFSSQL_Cx * c, uint32_t tno,
   return rc;
 }
 
+/* A field's index, or a personal field's subject index: recorded, pending,
+ * in the step; gdefssql_index_sweep() builds it once the step has committed
+ * (index_of() says what it is on). */
 static GDEFSTOR_Result add_index(GDEFSSQL_Cx * c, uint32_t tno,
     const Want * w, int role) {
   char index[GDEFSSQL_NAME_CAP];
-  char table[GDEFSSQL_NAME_CAP];
-  char col[GDEFSSQL_NAME_CAP];
-  const char * cols[2];
-  GDEFSTOR_Result rc;
   gdefssql_name_index(index, tno, role, w->grp, w->col);
-  if (role == GDEFSSQL_ROLE_INDEX) {
-    /* What a filter on the field reads: matching current items, then their
-     * entity. */
-    gdefssql_name_table(table, tno, GDEFSSQL_ROLE_CURRENT, w->grp);
-    gdefssql_name_column(col, w->col, 0);
-    cols[0] = col;
-    cols[1] = "ent";
-    rc = create_index(c, 0, index, table, cols, 2);
-  } else {
-    /* "Everything about this person": every version naming the subject. */
-    gdefssql_name_table(table, tno, GDEFSSQL_ROLE_GROUP, w->grp);
-    gdefssql_name_column(col, w->col, 1);
-    cols[0] = col;
-    rc = create_index(c, 0, index, table, cols, 1);
-  }
-  if (rc == GDEFSTOR_OK) {
-    rc = record(c, tno, w->grp, w->col, role, index, 0);
-  }
-  return rc;
+  return record(c, tno, w->grp, w->col, role, index, GDEFSSQL_KIND_PENDING);
 }
 
 GDEFSTOR_Result gdefssql_type_steps(GDEFSSQL_Cx * c, uint32_t tno,
@@ -729,6 +806,343 @@ GDEFSTOR_Result gdefssql_type_steps(GDEFSSQL_Cx * c, uint32_t tno,
   return rc;
 }
 
+/* ---- index builds, after the step (AD-15) --------------------------------- */
+
+/* One of the dialect's transaction statements, run as it is. */
+static GDEFSTOR_Result tx(GDEFSSQL_Cx * c, const char * sql) {
+  GDEFSTOR_Result rc = c->b->x.exec(c->b->x.ctx, c->conn, sql, strlen(sql));
+  if (rc != GDEFSTOR_OK) {
+    c->failed = 1;
+  }
+  return rc;
+}
+
+/* Run one of the dialect's own queries (its text carries its placeholders)
+ * with TEXT parameters: whether it returned a row, and that row's first
+ * @p ncols columns as integers. */
+static GDEFSTOR_Result ask(GDEFSSQL_Cx * c, const char * sql,
+    const char * const * params, size_t n, int * out_row, int64_t * out_cols,
+    unsigned ncols) {
+  const GDEFSSQL_Executor * x = &c->b->x;
+  void * stmt = NULL;
+  GDEFSTOR_Result rc;
+  size_t i;
+  *out_row = 0;
+  rc = x->prepare(x->ctx, c->conn, sql, strlen(sql), &stmt);
+  if (rc == GDEFSTOR_OK && stmt == NULL) {
+    rc = GDEFSTOR_ERR_INTERNAL;
+  }
+  for (i = 0; rc == GDEFSTOR_OK && i < n; i++) {
+    GDEFSSQL_Datum d;
+    memset(&d, 0, sizeof d);
+    d.kind = GDEFSSQL_DATUM_TEXT;
+    d.bytes = (const uint8_t *)params[i];
+    d.len = strlen(params[i]);
+    rc = x->bind(x->ctx, stmt, (unsigned)(i + 1), &d);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = x->step(x->ctx, stmt, out_row);
+  }
+  for (i = 0; rc == GDEFSTOR_OK && *out_row && i < ncols; i++) {
+    GDEFSSQL_Datum d;
+    memset(&d, 0, sizeof d);
+    rc = x->column(x->ctx, stmt, (unsigned)i, GDEFSSQL_DATUM_INT, &d);
+    if (rc == GDEFSTOR_OK && d.kind != GDEFSSQL_DATUM_INT) {
+      rc = GDEFSTOR_ERR_CORRUPT;
+    }
+    out_cols[i] = d.integer;
+  }
+  /* Drain it, so the statement has finished before the next one. */
+  while (rc == GDEFSTOR_OK && *out_row) {
+    int more = 0;
+    rc = x->step(x->ctx, stmt, &more);
+    if (!more) {
+      break;
+    }
+  }
+  if (stmt != NULL) {
+    x->finalize(x->ctx, stmt);
+  }
+  if (rc != GDEFSTOR_OK) {
+    c->failed = 1;
+  }
+  return rc;
+}
+
+enum { IX_ABSENT = 0, IX_INVALID, IX_VALID };
+
+/* What the engine holds of an index: with the dialect's validity query; a
+ * dialect without one builds atomically, so an index whose build returned
+ * success is valid and one never tried is absent. */
+static GDEFSTOR_Result index_held(GDEFSSQL_Cx * c, const char * index,
+    int * out) {
+  const char * params[2];
+  int row = 0;
+  int64_t v = 0;
+  GDEFSTOR_Result rc;
+  params[0] = c->qual != NULL ? c->qual : "";
+  params[1] = index;
+  rc = ask(c, c->b->d.index_valid, params, 2, &row, &v, 1);
+  if (rc == GDEFSTOR_OK) {
+    *out = !row ? IX_ABSENT : v != 0 ? IX_VALID : IX_INVALID;
+  }
+  return rc;
+}
+
+typedef struct Pend {
+  uint32_t tno;
+  uint32_t grp;
+  uint32_t col;
+  int role;
+  int held;  /* IX_* */
+  int built; /* built now and valid: mark it */
+} Pend;
+
+/* Every pending index row of the tenant, in key order. */
+static GDEFSTOR_Result pending_rows(GDEFSSQL_Cx * c, Pend ** out,
+    size_t * out_n) {
+  GDEFSSQL_Sb sb;
+  GDEFSSQL_St s;
+  GDEFSTOR_Result rc;
+  Pend * v = NULL;
+  size_t n = 0;
+  size_t cap = 0;
+  int row = 0;
+  gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
+  gdefssql_sb_kw(&sb, "SELECT ");
+  gdefssql_sb_col(&sb, "a0", "tno");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "grp");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "col");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "role");
+  gdefssql_sb_kw(&sb, " FROM ");
+  gdefssql_sb_table(&sb, "dss_name");
+  gdefssql_sb_kw(&sb, " ");
+  gdefssql_sb_ident(&sb, "a0");
+  gdefssql_sb_kw(&sb, " WHERE ");
+  gdefssql_sb_col(&sb, "a0", "kind");
+  gdefssql_sb_kw(&sb, " = ");
+  gdefssql_sb_int(&sb, GDEFSSQL_KIND_PENDING);
+  gdefssql_sb_kw(&sb, " ORDER BY ");
+  gdefssql_sb_col(&sb, "a0", "tno");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "grp");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "col");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "role");
+  rc = gdefssql_st_open(c, &sb, &s);
+  while (rc == GDEFSTOR_OK) {
+    int64_t k[4];
+    unsigned i;
+    rc = gdefssql_st_step(&s, &row);
+    if (rc != GDEFSTOR_OK || !row) {
+      break;
+    }
+    for (i = 0; rc == GDEFSTOR_OK && i < 4; i++) {
+      rc = gdefssql_st_int(&s, i, &k[i], NULL);
+    }
+    if (rc == GDEFSTOR_OK && (k[0] < 0 || k[0] > (int64_t)UINT32_MAX ||
+                                 k[1] < 0 || k[1] > (int64_t)UINT32_MAX ||
+                                 k[2] < 0 || k[2] > (int64_t)UINT32_MAX ||
+                                 k[3] < GDEFSSQL_ROLE_INDEX ||
+                                 k[3] > GDEFSSQL_ROLE_TENANT_INDEX)) {
+      rc = GDEFSTOR_ERR_CORRUPT;
+    }
+    if (rc == GDEFSTOR_OK && n == cap) {
+      size_t grown = cap == 0 ? 8 : cap * 2;
+      Pend * next = (Pend *)gcu_allocator_realloc(c->b->alloc, v,
+          grown * sizeof *next);
+      if (next == NULL) {
+        rc = GDEFSTOR_ERR_OOM;
+      } else {
+        v = next;
+        cap = grown;
+      }
+    }
+    if (rc == GDEFSTOR_OK) {
+      memset(&v[n], 0, sizeof v[n]);
+      v[n].tno = (uint32_t)k[0];
+      v[n].grp = (uint32_t)k[1];
+      v[n].col = (uint32_t)k[2];
+      v[n].role = (int)k[3];
+      n += 1;
+    }
+  }
+  gdefssql_st_close(&s);
+  gdefssql_sb_free(&sb);
+  if (rc != GDEFSTOR_OK) {
+    gcu_allocator_free(c->b->alloc, v);
+    return rc;
+  }
+  *out = v;
+  *out_n = n;
+  return GDEFSTOR_OK;
+}
+
+/* Mark one index row built. */
+static GDEFSTOR_Result mark_built(GDEFSSQL_Cx * c, const Pend * p) {
+  GDEFSSQL_Sb sb;
+  GDEFSTOR_Result rc;
+  gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
+  gdefssql_sb_kw(&sb, "UPDATE ");
+  gdefssql_sb_table(&sb, "dss_name");
+  gdefssql_sb_kw(&sb, " SET ");
+  gdefssql_sb_ident(&sb, "kind");
+  gdefssql_sb_kw(&sb, " = ");
+  gdefssql_sb_int(&sb, 0);
+  gdefssql_sb_kw(&sb, " WHERE ");
+  gdefssql_sb_ident(&sb, "tno");
+  gdefssql_sb_kw(&sb, " = ");
+  gdefssql_sb_int(&sb, p->tno);
+  gdefssql_sb_kw(&sb, " AND ");
+  gdefssql_sb_ident(&sb, "grp");
+  gdefssql_sb_kw(&sb, " = ");
+  gdefssql_sb_int(&sb, p->grp);
+  gdefssql_sb_kw(&sb, " AND ");
+  gdefssql_sb_ident(&sb, "col");
+  gdefssql_sb_kw(&sb, " = ");
+  gdefssql_sb_int(&sb, p->col);
+  gdefssql_sb_kw(&sb, " AND ");
+  gdefssql_sb_ident(&sb, "role");
+  gdefssql_sb_kw(&sb, " = ");
+  gdefssql_sb_int(&sb, p->role);
+  rc = gdefssql_cx_run(c, &sb);
+  gdefssql_sb_free(&sb);
+  return rc;
+}
+
+/* Drop an index the engine holds as invalid: the one drop this library
+ * writes. Such an index holds no data and no query uses it. */
+static GDEFSTOR_Result drop_invalid(GDEFSSQL_Cx * c, const char * index) {
+  GDEFSSQL_Sb sb;
+  GDEFSTOR_Result rc;
+  gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
+  gdefssql_sb_kw(&sb, c->b->d.index_drop);
+  gdefssql_sb_table(&sb, index);
+  rc = gdefssql_cx_exec(c, &sb);
+  gdefssql_sb_free(&sb);
+  return rc;
+}
+
+GDEFSTOR_Result gdefssql_index_sweep(GDEFSSQL_Cx * c, size_t * out_left) {
+  const GDEFSSQL_Dialect * d = &c->b->d;
+  Pend * v = NULL;
+  size_t n = 0;
+  size_t i;
+  size_t built = 0;
+  GDEFSTOR_Result rc;
+  GDEFSTOR_Result first = GDEFSTOR_OK;
+  *out_left = 0;
+  /* What is pending, and what the engine holds of each, in one snapshot. */
+  rc = tx(c, d->begin_write);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  rc = pending_rows(c, &v, &n);
+  for (i = 0; rc == GDEFSTOR_OK && i < n; i++) {
+    IndexDef def;
+    if (!index_of(v[i].tno, v[i].grp, v[i].col, v[i].role, &def)) {
+      rc = GDEFSTOR_ERR_CORRUPT;
+    } else if (d->index_valid != NULL) {
+      rc = index_held(c, def.index, &v[i].held);
+    }
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = tx(c, d->commit);
+  } else {
+    tx(c, d->rollback);
+  }
+  if (rc != GDEFSTOR_OK || n == 0) {
+    gcu_allocator_free(c->b->alloc, v);
+    *out_left = n;
+    return rc;
+  }
+  /* The builds, each a statement of its own outside any transaction. */
+  for (i = 0; i < n; i++) {
+    IndexDef def;
+    index_of(v[i].tno, v[i].grp, v[i].col, v[i].role, &def);
+    if (v[i].held == IX_VALID) {
+      /* Built before, by a sweep that stopped before it marked it. */
+      v[i].built = 1;
+      built += 1;
+      continue;
+    }
+    if (v[i].held == IX_INVALID) {
+      rc = drop_invalid(c, def.index);
+    }
+    if (rc == GDEFSTOR_OK) {
+      rc = create_index(c, def.unique, def.index, def.table, def.cols,
+          def.ncols);
+    }
+    if (rc != GDEFSTOR_OK) {
+      /* A failed build leaves its index pending (and, on an engine that
+       * builds concurrently, possibly invalid, which the next sweep drops).
+       * The connection is not used again. */
+      first = rc;
+      break;
+    }
+    v[i].built = 1;
+    built += 1;
+  }
+  /* Mark what is now valid, in a transaction of its own. */
+  if (built > 0 && !c->failed) {
+    rc = tx(c, d->begin_write);
+    for (i = 0; rc == GDEFSTOR_OK && i < n; i++) {
+      IndexDef def;
+      int held = IX_VALID;
+      if (!v[i].built) {
+        continue;
+      }
+      index_of(v[i].tno, v[i].grp, v[i].col, v[i].role, &def);
+      if (d->index_valid != NULL) {
+        rc = index_held(c, def.index, &held);
+      }
+      if (rc == GDEFSTOR_OK && held == IX_VALID) {
+        rc = mark_built(c, &v[i]);
+      } else if (rc == GDEFSTOR_OK) {
+        v[i].built = 0;
+      }
+    }
+    if (rc == GDEFSTOR_OK) {
+      rc = tx(c, d->commit);
+    } else {
+      tx(c, d->rollback);
+    }
+    if (rc != GDEFSTOR_OK) {
+      for (i = 0; i < n; i++) {
+        v[i].built = 0;
+      }
+      if (first == GDEFSTOR_OK) {
+        first = rc;
+      }
+    }
+  }
+  for (i = 0; i < n; i++) {
+    *out_left += v[i].built ? 0 : 1;
+  }
+  gcu_allocator_free(c->b->alloc, v);
+  return first;
+}
+
+GDEFSTOR_Result gdefssql_index_state(GDEFSSQL_Cx * c, uint32_t tno,
+    uint32_t grp, uint32_t col, int * out_state) {
+  GDEFSSQL_Cat cat;
+  const GDEFSSQL_CatRow * r;
+  GDEFSTOR_Result rc = gdefssql_cat_load(c, tno, &cat);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  r = have(&cat, grp, col, GDEFSSQL_ROLE_INDEX);
+  /* No record yet is a build not yet even recorded: still indexing. */
+  *out_state = r != NULL && r->kind == 0 ? GDEFSTOR_INDEX_READY
+                                         : GDEFSTOR_INDEX_INDEXING;
+  gdefssql_cat_free(&cat);
+  return GDEFSTOR_OK;
+}
+
 /* ---- reading a store's layout version, for an executor's open ------------- */
 
 GDEFSTOR_Result gdefssql_store_version(const GDEFSSQL_Dialect * dialect,
@@ -769,5 +1183,47 @@ GDEFSTOR_Result gdefssql_store_version(const GDEFSSQL_Dialect * dialect,
     return GDEFSTOR_ERR_CORRUPT;
   }
   *out_version = found ? v : 0;
+  return GDEFSTOR_OK;
+}
+
+GDEFSTOR_Result gdefssql_store_exists(const GDEFSSQL_Dialect * dialect,
+    const GDEFSSQL_Executor * executor, void * conn, const char * qualifier,
+    int kind, int * out_exists) {
+  GDEFSSQL_Back b;
+  GDEFSSQL_Cx c;
+  const char * params[2];
+  int row = 0;
+  int64_t v[2] = {0, 0};
+  GDEFSTOR_Result rc;
+  if (dialect == NULL || executor == NULL || conn == NULL ||
+      qualifier == NULL || out_exists == NULL ||
+      (kind != GDEFSSQL_STORE_DATA && kind != GDEFSSQL_STORE_KEYS) ||
+      executor->size != sizeof *executor || executor->prepare == NULL ||
+      executor->bind == NULL || executor->step == NULL ||
+      executor->column == NULL || executor->finalize == NULL ||
+      gdefssql_dialect_check(dialect) != GDEFSSQL_OK ||
+      dialect->store_exists == NULL ||
+      !gdefssql_name_ok(qualifier, dialect->max_identifier)) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  memset(&b, 0, sizeof b);
+  b.alloc = gcu_allocator_default();
+  b.d = *dialect;
+  b.x = *executor;
+  memset(&c, 0, sizeof c);
+  c.b = &b;
+  c.conn = conn;
+  c.qual = qualifier;
+  params[0] = qualifier;
+  params[1] = kind == GDEFSSQL_STORE_DATA ? "dss_schema" : "dsk_schema";
+  rc = ask(&c, dialect->store_exists, params, 2, &row, v, 2);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  if (row && v[0] == 0 && v[1] != 0) {
+    /* Someone else's tables, or the other kind of store: never written in. */
+    return GDEFSTOR_ERR_FORMAT;
+  }
+  *out_exists = row && v[0] != 0;
   return GDEFSTOR_OK;
 }

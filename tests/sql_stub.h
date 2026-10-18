@@ -38,7 +38,12 @@
  *   query that relies on an order it did not ask for answers wrongly;
  * - NULL sorts where the dialect says the engine sorts it;
  * - transactions are snapshots; a read sees the last commit;
- * - a connection holds one statement at a time, as executor.h promises.
+ * - a connection holds one statement at a time, as executor.h promises;
+ * - no CREATE INDEX of a data store runs inside a transaction (AD-15): one
+ *   that does is refused and counted. A build outside one goes straight to
+ *   the committed store, as a concurrent build does, and an injected failure
+ *   of a concurrent build leaves its index behind, invalid, as Postgres does;
+ *   an index is dropped only when it is invalid.
  *
  * Every statement run is recorded (text, parameters, tenant) for tests that
  * look at what was sent. Nothing here is the library's: it is the test's
@@ -106,7 +111,8 @@ inline GDEFSSQL_Dialect StdDialect() {
 /* Deliberately different in everything a dialect may say: brackets,
  * numbered ':N' parameters, its own type names and collation, NULL highest
  * (so the compiler must write NULLS FIRST/LAST), the MySQL upsert, RETURNING,
- * and a schema per tenant. */
+ * a schema per tenant made by the tenant's first write, and concurrent index
+ * builds that can leave an invalid index, as Postgres does. */
 inline GDEFSSQL_Dialect FakeDialect() {
   GDEFSSQL_Dialect d = StdDialect();
   d.name = "fake";
@@ -135,6 +141,11 @@ inline GDEFSSQL_Dialect FakeDialect() {
   d.begin_write = "START TRANSACTION READ WRITE";
   d.commit = "COMMIT WORK";
   d.rollback = "ROLLBACK WORK";
+  d.index_build = "CONCURRENTLY ";
+  d.index_valid = "SELECT VALIDITY :1 :2";
+  d.index_drop = "DROP INDEX CONCURRENTLY IF EXISTS ";
+  d.qualifier_create = "CREATE SCHEMA IF NOT EXISTS ";
+  d.store_exists = "SELECT STORE :1 :2";
   return d;
 }
 
@@ -210,6 +221,7 @@ struct Index {
   std::string table;
   std::vector<std::string> cols;
   bool unique = false;
+  bool valid = true; /* false: left by a failed concurrent build */
 };
 
 struct Table {
@@ -230,6 +242,7 @@ struct Table {
 struct Db {
   std::map<std::string, std::shared_ptr<Table>> tables;
   std::map<std::string, Index> indexes;
+  bool schema = false; /* CREATE SCHEMA ran for the tenant's qualifier */
 };
 
 /* ---- lexing and linting ------------------------------------------------- */
@@ -249,7 +262,7 @@ inline const std::set<std::string> & Keywords() {
       "OFFSET", "COUNT", "INSERT", "INTO", "VALUES", "UPDATE", "SET",
       "DELETE", "CREATE", "TABLE", "IF", "INDEX", "UNIQUE", "PRIMARY", "KEY",
       "ALTER", "ADD", "COLUMN", "RETURNING", "CONFLICT", "DO", "EXCLUDED",
-      "DUPLICATE"};
+      "DUPLICATE", "CONCURRENTLY", "SCHEMA", "DROP"};
   return k;
 }
 
@@ -498,11 +511,12 @@ struct Select {
 
 struct Stmt {
   enum K { CREATE_TABLE, CREATE_INDEX, ADD_COLUMN, INSERT, UPDATE, DELETE,
-      SELECT };
+      SELECT, CREATE_SCHEMA, DROP_INDEX };
   K k = SELECT;
   std::string table;
   std::string index;
   bool unique = false;
+  bool concurrent = false;
   std::vector<Col> cols;
   std::vector<std::string> names; /* key, index columns, insert columns */
   std::vector<ExprP> values;      /* INSERT VALUES, UPDATE SET */
@@ -523,7 +537,16 @@ class Parser {
     Stmt s;
     if (Kw("CREATE")) {
       bool unique = Kw("UNIQUE");
-      if (!unique && Kw("TABLE")) {
+      if (!unique && Kw("SCHEMA")) {
+        Want("IF");
+        Want("NOT");
+        Want("EXISTS");
+        s.k = Stmt::CREATE_SCHEMA;
+        s.table = Id();
+        if (s.table != qual_) {
+          throw std::runtime_error("a schema that is not the tenant's: " + s.table);
+        }
+      } else if (!unique && Kw("TABLE")) {
         Want("IF");
         Want("NOT");
         Want("EXISTS");
@@ -551,6 +574,7 @@ class Parser {
         Punct(")");
       } else {
         Want("INDEX");
+        s.concurrent = Kw("CONCURRENTLY");
         Want("IF");
         Want("NOT");
         Want("EXISTS");
@@ -563,6 +587,14 @@ class Parser {
         s.names = Names();
         Punct(")");
       }
+    } else if (Kw("DROP")) {
+      /* Only an index, and the engine allows only an invalid one. */
+      Want("INDEX");
+      s.concurrent = Kw("CONCURRENTLY");
+      Want("IF");
+      Want("EXISTS");
+      s.k = Stmt::DROP_INDEX;
+      s.index = TableName();
     } else if (Kw("ALTER")) {
       Want("TABLE");
       s.k = Stmt::ADD_COLUMN;
@@ -1152,6 +1184,7 @@ struct LogEntry {
   std::string tenant;
   std::string text;
   std::vector<Val> binds;
+  bool in_txn = false; /* run inside a transaction */
 };
 
 struct Engine;
@@ -1162,6 +1195,7 @@ struct Conn {
   bool write = false;
   bool in_txn = false;
   Db work; /* the snapshot, and a write's changes */
+  std::set<std::string> begin_indexes; /* the indexes the snapshot began with */
   std::string qual;
   int stmts = 0; /* prepared and not finalized: at most one (executor.h) */
 };
@@ -1173,6 +1207,8 @@ struct StmtH {
   std::vector<Val> binds;
   std::vector<bool> bound;
   bool ran = false;
+  bool validity = false; /* the dialect's index_valid query */
+  bool exists = false;   /* the dialect's store_exists query */
   Result result;
   size_t pos = 0;
 };
@@ -1195,6 +1231,11 @@ struct Engine {
   long discarded = 0;
   long open_conns = 0;
   long open_stmts = 0;
+  /* Fail the Nth index build (outside a transaction) from now, once: 0
+   * never. A concurrent build leaves its index invalid, as Postgres does. */
+  long fail_index_build = 0;
+  long index_builds_in_txn = 0; /* refused: CREATE INDEX inside a transaction */
+  long invalid_drops = 0;       /* drops of an invalid index */
   std::string last_error;
 
   explicit Engine(const GDEFSSQL_Dialect & dialect, bool q = false)
@@ -1270,6 +1311,69 @@ struct Engine {
     }
   }
 
+  /* CREATE INDEX outside any transaction: straight into the committed store,
+   * as a concurrent build is; IF NOT EXISTS skips an index of that name even
+   * when it is invalid, as Postgres does. */
+  GDEFSTOR_Result BuildOutside(Conn & c, const Stmt & s) {
+    Db & db = stores[c.tenant].committed;
+    if (!c.write) {
+      last_error = "an index build on a read connection";
+      return GDEFSTOR_ERR_IO;
+    }
+    if (s.concurrent != (d.index_build != nullptr && d.index_build[0] != '\0')) {
+      last_error = "a build that is not the dialect's";
+      return GDEFSTOR_ERR_IO;
+    }
+    if (db.indexes.count(s.index) != 0) {
+      return GDEFSTOR_OK;
+    }
+    auto it = db.tables.find(s.table);
+    if (it == db.tables.end()) {
+      last_error = "an index on no table: " + s.table;
+      return GDEFSTOR_ERR_IO;
+    }
+    for (const auto & col : s.names) {
+      if (it->second->Find(col) < 0) {
+        last_error = "an index on a column that is not there";
+        return GDEFSTOR_ERR_IO;
+      }
+    }
+    Index ix;
+    ix.name = s.index;
+    ix.table = s.table;
+    ix.cols = s.names;
+    ix.unique = s.unique;
+    if (fail_index_build > 0 && --fail_index_build == 0) {
+      if (s.concurrent) {
+        ix.valid = false;
+        db.indexes[s.index] = ix;
+      }
+      last_error = "an injected index build failure";
+      return GDEFSTOR_ERR_IO;
+    }
+    db.indexes[s.index] = ix;
+    return GDEFSTOR_OK;
+  }
+
+  GDEFSTOR_Result DropOutside(Conn & c, const Stmt & s) {
+    Db & db = stores[c.tenant].committed;
+    auto it = db.indexes.find(s.index);
+    if (!c.write || !s.concurrent) {
+      last_error = "a drop that is not the dialect's";
+      return GDEFSTOR_ERR_IO;
+    }
+    if (it == db.indexes.end()) {
+      return GDEFSTOR_OK;
+    }
+    if (it->second.valid) {
+      last_error = "a drop of a valid index: " + s.index;
+      return GDEFSTOR_ERR_IO;
+    }
+    invalid_drops += 1;
+    db.indexes.erase(it);
+    return GDEFSTOR_OK;
+  }
+
   Result Run(Conn & c, const std::string & text, const Lexed & lx,
       const std::vector<Val> & binds) {
     Parser p(lx, c.qual);
@@ -1323,6 +1427,11 @@ struct Engine {
       db.indexes[s.index] = ix;
       return res;
     }
+    case Stmt::CREATE_SCHEMA:
+      db.schema = true;
+      return res;
+    case Stmt::DROP_INDEX:
+      throw std::runtime_error("DROP INDEX inside a transaction");
     case Stmt::ADD_COLUMN: {
       Table & t = Mut(db, s.table);
       if (t.Find(s.cols[0].name) >= 0) {
@@ -1518,7 +1627,7 @@ inline GDEFSTOR_Result X_exec(void * ctx, void * conn, const char * sql,
   }
   Store & st = e->stores[c->tenant];
   if (e->keep_log) {
-    e->log.push_back(LogEntry{c->tenant, text, {}});
+    e->log.push_back(LogEntry{c->tenant, text, {}, c->in_txn});
   }
   if (!e->Tick()) {
     return GDEFSTOR_ERR_IO;
@@ -1536,6 +1645,10 @@ inline GDEFSTOR_Result X_exec(void * ctx, void * conn, const char * sql,
       st.writer = true;
     }
     c->work = st.committed;
+    c->begin_indexes.clear();
+    for (const auto & ix : st.committed.indexes) {
+      c->begin_indexes.insert(ix.first);
+    }
     c->in_txn = true;
     return GDEFSTOR_OK;
   }
@@ -1546,7 +1659,16 @@ inline GDEFSTOR_Result X_exec(void * ctx, void * conn, const char * sql,
     }
     if (c->write) {
       if (text == e->d.commit) {
+        /* Indexes built or dropped outside this transaction since it began
+         * stay as they are; those it made itself are added. */
+        std::map<std::string, Index> merged = st.committed.indexes;
+        for (const auto & ix : c->work.indexes) {
+          if (c->begin_indexes.count(ix.first) == 0) {
+            merged[ix.first] = ix.second;
+          }
+        }
         st.committed = c->work;
+        st.committed.indexes = merged;
       }
       st.writer = false;
     }
@@ -1554,18 +1676,30 @@ inline GDEFSTOR_Result X_exec(void * ctx, void * conn, const char * sql,
     c->in_txn = false;
     return GDEFSTOR_OK;
   }
-  if (!c->in_txn) {
-    e->last_error = "a statement outside a transaction: " + text;
-    return GDEFSTOR_ERR_IO;
-  }
   try {
     Lexed lx = Lex(e->d, text);
     if (lx.params != 0) {
       throw std::runtime_error("exec of a statement with parameters");
     }
     Stmt s = Parser(lx, c->qual).Statement();
+    /* The key store is a port of its own: its one index is made with its
+     * table, in its first transaction (keystore.c says why). */
+    bool keystore = s.table.rfind("dsk_", 0) == 0;
+    if (s.k == Stmt::CREATE_INDEX && c->in_txn && !keystore) {
+      e->index_builds_in_txn += 1;
+      throw std::runtime_error("CREATE INDEX inside a transaction (AD-15): " + text);
+    }
+    if (!c->in_txn) {
+      if (s.k == Stmt::CREATE_INDEX) {
+        return e->BuildOutside(*c, s);
+      }
+      if (s.k == Stmt::DROP_INDEX) {
+        return e->DropOutside(*c, s);
+      }
+      throw std::runtime_error("a statement outside a transaction: " + text);
+    }
     if (s.k != Stmt::CREATE_TABLE && s.k != Stmt::CREATE_INDEX &&
-        s.k != Stmt::ADD_COLUMN) {
+        s.k != Stmt::ADD_COLUMN && s.k != Stmt::CREATE_SCHEMA) {
       throw std::runtime_error("exec of a statement that is not DDL");
     }
     e->Run(*c, text, lx, {});
@@ -1593,17 +1727,29 @@ inline GDEFSTOR_Result X_prepare(void * ctx, void * conn, const char * sql,
     delete h;
     return GDEFSTOR_ERR_IO;
   }
-  if (!c->in_txn) {
+  bool exists = e->d.store_exists != nullptr && h->text == e->d.store_exists;
+  if (!c->in_txn && !exists) {
     e->last_error = "a statement outside a transaction: " + h->text;
     delete h;
     return GDEFSTOR_ERR_IO;
   }
-  try {
-    h->lexed = Lex(e->d, h->text);
-  } catch (const std::exception & ex) {
-    e->last_error = ex.what();
-    delete h;
-    return GDEFSTOR_ERR_IO;
+  if (exists) {
+    /* The dialect's catalog query: (qualifier, version table) -> a row when
+     * the schema exists: whether the table is in it, and how many tables. */
+    h->exists = true;
+    h->lexed.params = 2;
+  } else if (e->d.index_valid != nullptr && h->text == e->d.index_valid) {
+    /* The dialect's own catalog query: (qualifier, index) -> its validity. */
+    h->validity = true;
+    h->lexed.params = 2;
+  } else {
+    try {
+      h->lexed = Lex(e->d, h->text);
+    } catch (const std::exception & ex) {
+      e->last_error = ex.what();
+      delete h;
+      return GDEFSTOR_ERR_IO;
+    }
   }
   h->binds.resize((size_t)h->lexed.params);
   h->bound.assign((size_t)h->lexed.params, false);
@@ -1661,7 +1807,37 @@ inline GDEFSTOR_Result X_step(void * ctx, void * stmt, int * out_row) {
       }
     }
     if (e->keep_log) {
-      e->log.push_back(LogEntry{h->c->tenant, h->text, h->binds});
+      e->log.push_back(LogEntry{h->c->tenant, h->text, h->binds, h->c->in_txn});
+    }
+    if (h->exists) {
+      const Store & st = e->stores[h->c->tenant];
+      if (h->binds[0].k == V_TEXT && h->binds[1].k == V_TEXT &&
+          h->binds[0].s == st.qual && st.committed.schema) {
+        h->result.rows.push_back(
+            {Val::Int(st.committed.tables.count(h->binds[1].s) != 0 ? 1 : 0),
+                Val::Int((int64_t)st.committed.tables.size())});
+      }
+      if (h->pos < h->result.rows.size()) {
+        h->pos += 1;
+        *out_row = 1;
+      }
+      return GDEFSTOR_OK;
+    }
+    if (h->validity) {
+      if (h->binds[0].k != V_TEXT || h->binds[1].k != V_TEXT ||
+          h->binds[0].s != h->c->qual) {
+        e->last_error = "a validity query for another schema";
+        return GDEFSTOR_ERR_IO;
+      }
+      auto it = h->c->work.indexes.find(h->binds[1].s);
+      if (it != h->c->work.indexes.end()) {
+        h->result.rows.push_back({Val::Int(it->second.valid ? 1 : 0)});
+      }
+      if (h->pos < h->result.rows.size()) {
+        h->pos += 1;
+        *out_row = 1;
+      }
+      return GDEFSTOR_OK;
     }
     try {
       h->result = e->Run(*h->c, h->text, h->lexed, h->binds);

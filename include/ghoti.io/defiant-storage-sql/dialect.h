@@ -145,6 +145,44 @@ typedef struct GDEFSSQL_Dialect {
   const char * begin_write;   ///< Starts the tenant's write transaction.
   const char * commit;        ///< Commits either.
   const char * rollback;      ///< Rolls either back.
+
+  /* ---- index builds and schemas (story S4) ------------------------------
+   * Every member below may be NULL (a dialect zeroed and filled as before
+   * has none of them), and a NULL one means what SQLite does. */
+
+  /** Written between `CREATE [UNIQUE] INDEX ` and `IF NOT EXISTS ` of every
+   * index build, e.g. `CONCURRENTLY ` (Postgres). An index is never built in
+   * a transaction (AD-15): it is recorded in its step and built after the step
+   * commits (backend.h, "Index builds"). NULL or empty: a plain build. */
+  const char * index_build;
+  /**
+   * Says whether a built index is valid: one statement taking two TEXT
+   * parameters, the tenant's qualifier ("" for none) and the index's name,
+   * whose one row's first column is an integer, non-zero for a valid index,
+   * and which returns no row when there is no such index. Postgres leaves an
+   * invalid index behind when a concurrent build fails. NULL: a build that
+   * succeeded made a valid index and one that failed made none (SQLite).
+   */
+  const char * index_valid;
+  /** Written before the qualified name of an index that @ref index_valid
+   * found invalid, to drop it before it is built again, e.g. `DROP INDEX
+   * CONCURRENTLY IF EXISTS `. Required with @ref index_valid. Dropping an
+   * invalid index is the one drop this library ever writes: such an index
+   * holds no data and serves no query. */
+  const char * index_drop;
+  /** Written before the quoted qualifier to make a tenant's schema, e.g.
+   * `CREATE SCHEMA IF NOT EXISTS `, first in the transaction that makes the
+   * tenant tables. NULL: the executor's `open` makes the store (a file). */
+  const char * qualifier_create;
+  /** Says whether a tenant's store exists: one statement taking two TEXT
+   * parameters, the qualifier and the name of the store's version table
+   * (`dss_schema`, or `dsk_schema` for a key store), that returns no row when
+   * there is no such schema and otherwise one row of two integers: non-zero
+   * when the version table is in it, and how many tables it holds. This
+   * library does not run it on its own: an executor whose `open` cannot see a
+   * missing store otherwise (a schema, where SQLite has a missing file) runs
+   * it through gdefssql_store_exists(). */
+  const char * store_exists;
 } GDEFSSQL_Dialect;
 
 /**
@@ -154,7 +192,13 @@ typedef struct GDEFSSQL_Dialect {
  * @return ::GDEFSSQL_OK, or ::GDEFSSQL_ERR_INVALID naming nothing: a NULL or
  *   empty string, a quote or placeholder that could be read as part of a
  *   generated name, a limit below its minimum, an unknown upsert form, or a
- *   @ref GDEFSSQL_Dialect::size that is not this header's. Zero
+ *   @ref GDEFSSQL_Dialect::size that is not this header's, an empty
+ *   @ref GDEFSSQL_Dialect::index_valid, @ref GDEFSSQL_Dialect::index_drop,
+ *   @ref GDEFSSQL_Dialect::qualifier_create or
+ *   @ref GDEFSSQL_Dialect::store_exists (NULL is allowed), an
+ *   @ref GDEFSSQL_Dialect::index_build with a byte of `[a-z0-9_]`, or
+ *   @ref GDEFSSQL_Dialect::index_valid without
+ *   @ref GDEFSSQL_Dialect::index_drop. Zero
  *   @ref GDEFSSQL_Dialect::ddl_transactional is ::GDEFSSQL_ERR_UNSUPPORTED.
  */
 GDEFSSQL_API GDEFSSQL_Result gdefssql_dialect_check(

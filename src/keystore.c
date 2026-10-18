@@ -206,8 +206,15 @@ static GDEFSTOR_Result insert(Cx * c, const char * table, const KKv * kv,
   return rc;
 }
 
-/* The four tables, their index and their rows, if missing, and the version
- * check. Runs inside a write transaction. */
+/* The four tables, their index and their rows, if missing (with the
+ * dialect's qualifier_create, the tenant's schema first), and the version
+ * check. Runs inside a write transaction.
+ *
+ * The one index here, dsk_ledger_seq, is made in this transaction, beside
+ * its table: the key store is a port of its own, not a data store, this is
+ * its first transaction, and the table is empty and new in it. AD-15's rule
+ * (no index built inside a step) is about a data store's steps, where a
+ * table may be large; that is backend.h's "Index builds". */
 static GDEFSTOR_Result tenant_init(Cx * c) {
   static const KCol schema_cols[] = {{"id", GDEFSSQL_COL_ID},
       {"version", GDEFSSQL_COL_ID}};
@@ -221,7 +228,19 @@ static GDEFSTOR_Result tenant_init(Cx * c) {
   KRead r;
   GDEFSTOR_Result rc;
   int found = 0;
-  rc = create_table(c, "dsk_schema", schema_cols, 2, "id");
+  rc = GDEFSTOR_OK;
+  if (c->qual != NULL && c->b->d.qualifier_create != NULL) {
+    /* The tenant's schema, in the same transaction as its tables. */
+    Sb sb;
+    gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, NULL);
+    gdefssql_sb_kw(&sb, c->b->d.qualifier_create);
+    gdefssql_sb_ident(&sb, c->qual);
+    rc = gdefssql_cx_exec(c, &sb);
+    gdefssql_sb_free(&sb);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = create_table(c, "dsk_schema", schema_cols, 2, "id");
+  }
   if (rc == GDEFSTOR_OK) {
     rc = create_table(c, "dsk_counter", counter_cols, 2, "id");
   }

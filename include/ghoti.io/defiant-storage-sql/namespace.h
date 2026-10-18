@@ -56,6 +56,7 @@
 #define gdefssql_result_from_port GHOTIIO_DEFSSQL(gdefssql_result_from_port)
 #define gdefssql_result_string GHOTIIO_DEFSSQL(gdefssql_result_string)
 #define gdefssql_result_to_port GHOTIIO_DEFSSQL(gdefssql_result_to_port)
+#define gdefssql_store_exists GHOTIIO_DEFSSQL(gdefssql_store_exists)
 #define gdefssql_store_version GHOTIIO_DEFSSQL(gdefssql_store_version)
 
 /// @endcond

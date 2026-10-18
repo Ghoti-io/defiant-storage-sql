@@ -40,6 +40,7 @@
 typedef struct GDEFSSQL_Ready {
   char * tenant;
   size_t len;
+  int pending; /* an index build is still to do (AD-15): sweep after commits */
   struct GDEFSSQL_Ready * next;
 } Ready;
 
@@ -872,6 +873,7 @@ static GDEFSTOR_Result m_begin(void * ctx, const char * tenant,
   c.qual = qual;
   rc = checked_qualifier(b, qual);
   if (rc == GDEFSTOR_OK && ready_find(b, tenant, tenant_len) == NULL) {
+    size_t left = 0;
     /* The tenant tables, in a transaction of their own before any data. */
     rc = txn_sql(&c, b->d.begin_write);
     if (rc == GDEFSTOR_OK) {
@@ -883,10 +885,36 @@ static GDEFSTOR_Result m_begin(void * ctx, const char * tenant,
       }
     }
     if (rc == GDEFSTOR_OK) {
+      /* Then every index still to build, the tenant tables' own and any a
+       * build that failed in an earlier life of a backend left (AD-15).
+       * A failed build is not this write's failure: it stays pending. */
+      GDEFSTOR_Result built = gdefssql_index_sweep(&c, &left);
+      if (built != GDEFSTOR_OK) {
+        left = left > 0 ? left : 1;
+      }
+      if (c.failed) {
+        /* An error, even in a build, ends the connection (AD-14). */
+        b->x.close(b->x.ctx, c.conn, 1);
+        c.conn = NULL;
+        c.failed = 0;
+        qual = NULL;
+        rc = b->x.open(b->x.ctx, tenant, tenant_len, 1, &c.conn, &qual);
+        if (rc == GDEFSTOR_OK && c.conn == NULL) {
+          rc = GDEFSTOR_ERR_INTERNAL;
+        }
+        if (rc != GDEFSTOR_OK) {
+          return rc;
+        }
+        c.qual = qual;
+        rc = checked_qualifier(b, qual);
+      }
+    }
+    if (rc == GDEFSTOR_OK) {
       Ready * r = (Ready *)gdefssql_mem0(b->alloc, sizeof *r);
       if (r != NULL) {
         r->tenant = dup(b->alloc, tenant, tenant_len);
         r->len = tenant_len;
+        r->pending = left > 0;
         if (r->tenant == NULL) {
           gcu_allocator_free(b->alloc, r);
         } else {
@@ -943,6 +971,20 @@ static GDEFSTOR_Result m_commit(void * ctx, void * txn) {
     rc = txn_sql(&x->cx, b->d.commit);
     if (rc != GDEFSTOR_OK) {
       txn_sql(&x->cx, b->d.rollback);
+    }
+  }
+  if (rc == GDEFSTOR_OK) {
+    Ready * r = ready_find(b, x->tenant, x->tenant_len);
+    if (x->cx.pending || (r != NULL && r->pending)) {
+      /* The indexes this write's steps recorded, built now that the steps
+       * have committed, outside any transaction (AD-15), on the connection
+       * that wrote them. The write itself is committed whatever the builds
+       * do; one that fails stays pending for the next commit. */
+      size_t left = 0;
+      GDEFSTOR_Result built = gdefssql_index_sweep(&x->cx, &left);
+      if (r != NULL) {
+        r->pending = built != GDEFSTOR_OK || left > 0;
+      }
     }
   }
   b->x.close(b->x.ctx, x->cx.conn, x->cx.failed);
@@ -2227,6 +2269,52 @@ static GDEFSTOR_Result m_dump(void * ctx, const char * tenant,
   return rd_close(&r, rc);
 }
 
+static GDEFSTOR_Result m_index_state(void * ctx, const char * tenant,
+    size_t tenant_len, const GDEFSTOR_Type * type, size_t field,
+    int * out_state) {
+  Back * b = (Back *)ctx;
+  GDEFSTOR_FieldInfo f;
+  const char * name = NULL;
+  size_t name_len = 0;
+  uint32_t tno = 0;
+  int state = GDEFSTOR_INDEX_INDEXING;
+  Rd r;
+  GDEFSTOR_Result rc;
+  memset(&f, 0, sizeof f);
+  f.size = sizeof f;
+  if (b == NULL || type == NULL || out_state == NULL ||
+      gdefstor_type_name(type, &name, &name_len) != GDEFSTOR_OK ||
+      gdefstor_type_field(type, field, &f) != GDEFSTOR_OK ||
+      f.type == GDEFSTOR_FIELD_GROUP) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  rc = rd_open(b, NULL, tenant, tenant_len, &r);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  if (r.empty) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  rc = gdefssql_type_number(r.c, name, name_len, &tno);
+  if (rc == GDEFSTOR_OK && tno == 0) {
+    rc = GDEFSTOR_ERR_INVALID;
+  }
+  if (rc == GDEFSTOR_OK) {
+    int multiple = (f.flags & GDEFSTOR_FIELD_MULTIPLE) != 0;
+    rc = gdefssql_index_state(r.c, tno, multiple ? f.group : f.in_group,
+        multiple ? 0 : f.column, &state);
+  }
+  if (rc == GDEFSTOR_ERR_INVALID) {
+    GDEFSTOR_Result end = rd_close(&r, GDEFSTOR_OK);
+    return end == GDEFSTOR_OK ? GDEFSTOR_ERR_INVALID : end;
+  }
+  rc = rd_close(&r, rc);
+  if (rc == GDEFSTOR_OK) {
+    *out_state = state;
+  }
+  return rc;
+}
+
 static void m_destroy(void * ctx) {
   Back * b = (Back *)ctx;
   if (b == NULL) {
@@ -2299,5 +2387,7 @@ GDEFSSQL_Result gdefssql_model_backend(const GDEFSSQL_Dialect * dialect,
   out->query = m_query;
   out->rebuild = m_rebuild;
   out->dump = m_dump;
+  out->index_ctx = b;
+  out->index_state = m_index_state;
   return GDEFSSQL_OK;
 }

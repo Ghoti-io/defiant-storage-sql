@@ -368,6 +368,16 @@ GDEFSSQL_Result gdefssql_dialect_check(const GDEFSSQL_Dialect * d) {
       return GDEFSSQL_ERR_INVALID;
     }
   }
+  /* The optional members: absent, or a string of the dialect's own. The
+   * build word sits between generated words, so it must not run into one. */
+  if ((d->index_valid != NULL && !filled(d->index_valid)) ||
+      (d->index_drop != NULL && !filled(d->index_drop)) ||
+      (d->qualifier_create != NULL && !filled(d->qualifier_create)) ||
+      (d->store_exists != NULL && !filled(d->store_exists)) ||
+      (d->index_build != NULL && !inert(d->index_build)) ||
+      (d->index_valid != NULL && d->index_drop == NULL)) {
+    return GDEFSSQL_ERR_INVALID;
+  }
   if (!d->ddl_transactional) {
     return GDEFSSQL_ERR_UNSUPPORTED;
   }

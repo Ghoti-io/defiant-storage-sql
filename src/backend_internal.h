@@ -46,6 +46,8 @@
 #define gdefssql_tenant_init GHOTIIO_DEFSSQL(gdefssql_tenant_init)
 #define gdefssql_type_steps GHOTIIO_DEFSSQL(gdefssql_type_steps)
 #define gdefssql_type_number GHOTIIO_DEFSSQL(gdefssql_type_number)
+#define gdefssql_index_sweep GHOTIIO_DEFSSQL(gdefssql_index_sweep)
+#define gdefssql_index_state GHOTIIO_DEFSSQL(gdefssql_index_state)
 
 /* The backend: one per store. */
 typedef struct GDEFSSQL_Back {
@@ -62,6 +64,7 @@ typedef struct GDEFSSQL_Cx {
   void * conn;
   const char * qual;
   int failed; /* an executor call failed: roll back and discard */
+  int pending; /* a step recorded an index to build after the commit */
 } GDEFSSQL_Cx;
 
 /* A statement being stepped. */
@@ -134,8 +137,10 @@ const GDEFSSQL_CatGroup * gdefssql_cat_group(const GDEFSSQL_Cat * cat,
 
 /* ---- schema (schema.c) ---------------------------------------------------- */
 
-/* Create the six tenant tables and their rows, if missing, and check the
- * layout version. Runs inside a transaction the caller opened. */
+/* Create the six tenant tables and their rows, if missing (with the
+ * dialect's qualifier_create, the tenant's schema first), record their two
+ * indexes as pending steps, and check the layout version. Runs inside a
+ * transaction the caller opened. */
 GDEFSTOR_Result gdefssql_tenant_init(GDEFSSQL_Cx * c);
 
 /* The number of type @p name: 0 in *out when it was never declared. */
@@ -143,8 +148,22 @@ GDEFSTOR_Result gdefssql_type_number(GDEFSSQL_Cx * c, const char * name,
     size_t name_len, uint32_t * out);
 
 /* Every additive step @p decl needs beyond what dss_name records for type
- * @p tno, run in order and recorded. */
+ * @p tno, run in order and recorded. An index is only recorded, as pending,
+ * and sets GDEFSSQL_Cx::pending: gdefssql_index_sweep() builds it after the
+ * transaction commits. */
 GDEFSTOR_Result gdefssql_type_steps(GDEFSSQL_Cx * c, uint32_t tno,
     const GDEFSTOR_Type * decl);
+
+/* Build every index dss_name records as pending, on @p c, which has no
+ * transaction open (AD-15: no index is built inside one), and mark each one
+ * built that is. Stops at the first failure, which it returns; the rest stay
+ * pending. *out_left receives how many are still pending (on success, 0). */
+GDEFSTOR_Result gdefssql_index_sweep(GDEFSSQL_Cx * c, size_t * out_left);
+
+/* The state of the field index of column @p col of group @p grp of type
+ * @p tno, read inside the transaction open on @p c: GDEFSTOR_INDEX_READY once
+ * built, GDEFSTOR_INDEX_INDEXING while pending or not recorded. */
+GDEFSTOR_Result gdefssql_index_state(GDEFSSQL_Cx * c, uint32_t tno,
+    uint32_t grp, uint32_t col, int * out_state);
 
 #endif /* GHOTI_IO_GDEFSSQL_SRC_BACKEND_INTERNAL_H */

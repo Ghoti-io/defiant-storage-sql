@@ -102,6 +102,37 @@ plant non-additive-step src/schema.c testSchema \
       gdefssql_sb_free(&sb);
     }'
 
+# A field's index built in its step, inside the declaring write's
+# transaction, instead of recorded and built after the commit (AD-15).
+plant index-in-step src/schema.c testSchema \
+  'Index.NoIndexIsBuiltInsideAStepTransaction' \
+  '  gdefssql_name_index(index, tno, role, w->grp, w->col);
+  return record(c, tno, w->grp, w->col, role, index, GDEFSSQL_KIND_PENDING);' \
+  '  IndexDef def;
+  GDEFSTOR_Result rc;
+  gdefssql_name_index(index, tno, role, w->grp, w->col);
+  index_of(tno, w->grp, w->col, role, &def);
+  rc = create_index(c, def.unique, def.index, def.table, def.cols, def.ncols);
+  return rc != GDEFSTOR_OK ? rc
+                           : record(c, tno, w->grp, w->col, role, index, 0);'
+
+# A drop of an index that is valid: every pending index dropped and built
+# again, the one drop allowed widened from an invalid index to any.
+plant drop-of-a-valid-index src/schema.c testSchema \
+  'Index.AnIndexAlreadyBuiltIsMarkedAndNotDroppedOrRebuilt' \
+  '    if (v[i].held == IX_VALID) {
+      /* Built before, by a sweep that stopped before it marked it. */
+      v[i].built = 1;
+      built += 1;
+      continue;
+    }
+    if (v[i].held == IX_INVALID) {
+      rc = drop_invalid(c, def.index);
+    }' \
+  '    if (d->index_drop != NULL) {
+      rc = drop_invalid(c, def.index);
+    }'
+
 # The total counted after the page: the page's length.
 plant count-after-limit src/backend.c testAgreement \
   'Agreement.RandomQueriesMatchTheReferenceScan' \

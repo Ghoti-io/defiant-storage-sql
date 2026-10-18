@@ -312,7 +312,13 @@ inline GDEFSTOR_Result Ask(GDEFSTOR_Store * store, const std::string & type,
 /* ---- the statement log ---------------------------------------------------- */
 
 inline bool IsDdl(const std::string & s) {
-  return s.rfind("CREATE ", 0) == 0 || s.rfind("ALTER ", 0) == 0;
+  return s.rfind("CREATE ", 0) == 0 || s.rfind("ALTER ", 0) == 0 ||
+         s.rfind("DROP ", 0) == 0;
+}
+
+inline bool IsIndexBuild(const std::string & s) {
+  return s.rfind("CREATE INDEX ", 0) == 0 ||
+         s.rfind("CREATE UNIQUE INDEX ", 0) == 0;
 }
 
 /* The DDL logged from entry @p from on. */
