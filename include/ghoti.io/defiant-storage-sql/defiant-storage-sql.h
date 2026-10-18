@@ -29,6 +29,10 @@
 
 #include <ghoti.io/defiant-storage-sql/macros.h>
 #include <ghoti.io/defiant-storage-sql/allocator.h>
+#include <ghoti.io/defiant-storage-sql/backend.h>
+#include <ghoti.io/defiant-storage-sql/compile.h>
 #include <ghoti.io/defiant-storage-sql/core.h>
+#include <ghoti.io/defiant-storage-sql/dialect.h>
+#include <ghoti.io/defiant-storage-sql/executor.h>
 
 #endif /* GHOTI_IO_GDEFSSQL_DEFIANT_STORAGE_SQL_H */
