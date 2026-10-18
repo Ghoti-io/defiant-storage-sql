@@ -262,7 +262,9 @@ inline bool KnownIdent(const std::string & s) {
       "name", "tno", "decl", "grp", "col", "role", "kind", "pid", "rid",
       "type", "base", "body", "creator", "created", "rev", "last_item",
       "seq", "pub", "del", "actor", "at", "cseq", "who", "why", "ent", "item",
-      "vfrom", "vto", "parent", "ord"};
+      "vfrom", "vto", "parent", "ord", "dsk_schema", "dsk_counter",
+      "dsk_key", "dsk_ledger", "dsk_ledger_seq", "last_seq", "subject",
+      "secret"};
   if (fixed.count(s) != 0) {
     return true;
   }

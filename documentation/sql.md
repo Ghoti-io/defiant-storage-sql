@@ -1,6 +1,7 @@
 # The SQL layer
 
-**Status:** describes what shipped in story S2 (2026-10-18).
+**Status:** describes what shipped in story S2 (2026-10-18), with the key
+store and `gdefssql_store_version()` added in story S3.
 
 This is the contract between `defiant-storage-sql` and the engine backends
 that sit on it. The port's meaning is `defiant-storage`'s
@@ -24,6 +25,8 @@ No identifier is built from caller text. Every identifier is one of:
 | `vC`, `vCs` | column C of a group, and its subject column |
 | fixed column names | `rid pid creator created rev last_item seq pub del actor at cseq who why ent item vfrom vto parent ord id version last_row last_type last_cseq name tno decl grp col role kind type base body` |
 | `aK` | a table alias in one statement |
+| `dsk_schema`, `dsk_counter`, `dsk_key`, `dsk_ledger`, `dsk_ledger_seq` | the key store's tables and index (section 8), never in a data store |
+| `subject secret last_seq` | the key store's column names |
 
 N is the type's number, given out by `dss_counter.last_type` the first time a
 type is declared; G and C are the port's stable group and column numbers
@@ -223,6 +226,40 @@ What S3 (SQLite) and S4 (Postgres) supply, and what they must know:
 - **Indexes.** A field filter is written as `a0.rid IN (SELECT c.ent ...)` so
   that an engine can drive it from `tN_iG_C (vC, ent)`; a sort on a root
   field uses `tN_c0`; nothing relies on a partial index.
-- **Not here:** the key store (S5), blind indexes (S5), content-hash values
-  (AD-14, later), the old key/bytes tables (the backends keep them until S9),
-  and old files (S3 refuses them by its own check).
+- **Refusing a store it must not serve.** The backends check
+  `dss_schema.version` on the first write of a tenant, never on a read. An
+  executor that can see from the engine's catalog that the version table
+  exists calls `gdefssql_store_version()` on each new connection, before
+  `open` returns it, and refuses another version; the call is one `SELECT`
+  through the executor itself. A store this library did not make (SQLite: a
+  milestone-1 file, with `defiant_record` and no `dss_schema`) is the
+  executor's to recognise from the catalog and refuse, before anything here
+  can create a table in it.
+- **Not here:** blind indexes (S5), content-hash values (AD-14, later), and
+  the old key/bytes tables (the backends keep them until S9).
+
+## 8. The key store
+
+`gdefssql_keystore_backend()` (keystore.h) serves the key store port
+(`defiant-storage`'s keystore.h) from a dialect and an executor that reach a
+database of its own, never a tenant's data store (AD-13, AD-19). Per tenant:
+
+| Table | Columns | Key |
+| --- | --- | --- |
+| `dsk_schema` | `id`, `version` (1) | `id` |
+| `dsk_counter` | `id`, `last_seq` | `id` |
+| `dsk_key` | `subject` REFERENCE, `secret` BYTES | `subject` |
+| `dsk_ledger` | `subject` REFERENCE, `seq`, `at` DATETIME; unique index `dsk_ledger_seq (seq)` | `subject` |
+
+| Operation | Statements |
+| --- | --- |
+| first write per tenant | the four tables and the index, `IF NOT EXISTS`, and their rows, in a transaction of their own; another `dsk_schema.version` refused |
+| create | in the write: the ledger row and the key row by `subject` (either makes it `GDEFSTOR_ERR_INVALID`), then `INSERT` of the key the cipher's randomness made |
+| wrap, unwrap | in a read: the ledger row (erased), else the key row; the cipher seals or opens outside the database |
+| erase, ledger append | in the write: the ledger row (present: nothing to do), `DELETE` of the key row, the counter, `INSERT` of the ledger row |
+| ledger | `SELECT subject, at ... ORDER BY seq` |
+
+A key read for a wrap is copied out, used and wiped; a key never reaches a
+log, a statement's text or a data store. What the engine keeps of a deleted
+key row (free pages, a write-ahead log, dead tuples) is the engine backend's
+to clear.

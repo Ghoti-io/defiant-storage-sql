@@ -11,7 +11,10 @@ form to SQL. It executes nothing. A backend (`defiant-storage-sqlite`,
 placeholders, type names, collation, NULL order, upsert form, limits, the
 transaction statements) and an **executor** (`executor.h`: open a tenant's
 connection, prepare, bind, step, read a column, finalize, exec), and gets a
-complete `GDEFSTOR_ModelBackend` back.
+complete `GDEFSTOR_ModelBackend` back. Given a dialect, an executor of its own
+and a cipher, `gdefssql_keystore_backend()` (`keystore.h`) is the key store
+port's backend the same way: subject keys and the erasure ledger, in a
+database apart from every data store.
 
 ```c
 #include <ghoti.io/defiant-storage-sql/defiant-storage-sql.h>
@@ -69,15 +72,20 @@ relies on an order it did not ask for answers wrongly.
 - `testSchema`: the schema of a nested declaration, steps taken once and only
   additively, hostile names, the column limit, layout versions, an engine
   error part way through a write.
+- `testKeystore`: the port's key store conformance suite (`keystore.inc`) on
+  `gdefssql_keystore_backend()`, what its tables hold after an erasure, both
+  dialects, and `gdefssql_store_version()`.
 
 `make test` also runs `check-sql`, which plants each defect the story names (an
 unvalidated identifier, a concatenated value, a dropped WHERE clause, a
 non-additive step, count after limit, the tiebreak removed, NULL order
-flipped, plus a `valid_to` written twice and a current table left stale) in a
+flipped, plus a `valid_to` written twice, a current table left stale, and an
+erasure that keeps the key or writes no ledger row) in a
 scratch copy of the source and requires a named test to fail for each;
 `check-labels`, `check-seams` and `check-symbols`, each with plants of its own.
 
 ## Status
 
-Built in story S2 of the storage rewrite. The SQLite (S3) and Postgres (S4)
-backends that use it are not built yet.
+Built in story S2 of the storage rewrite; the key store backend and
+`gdefssql_store_version()` were added in S3, with the SQLite backend that
+uses them. The Postgres backend (S4) is not built yet.

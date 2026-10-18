@@ -40,6 +40,7 @@
 #define GDEFSSQL_Datum GHOTIIO_DEFSSQL(GDEFSSQL_Datum)
 #define GDEFSSQL_Executor GHOTIIO_DEFSSQL(GDEFSSQL_Executor)
 #define GDEFSSQL_Compiled GHOTIIO_DEFSSQL(GDEFSSQL_Compiled)
+#define GDEFSSQL_StoreKind GHOTIIO_DEFSSQL(GDEFSSQL_StoreKind)
 
 #define gdefssql_allocator_default GHOTIIO_DEFSSQL(gdefssql_allocator_default)
 #define gdefssql_compiled_bind GHOTIIO_DEFSSQL(gdefssql_compiled_bind)
@@ -49,11 +50,13 @@
 #define gdefssql_compiled_free GHOTIIO_DEFSSQL(gdefssql_compiled_free)
 #define gdefssql_compiled_text GHOTIIO_DEFSSQL(gdefssql_compiled_text)
 #define gdefssql_dialect_check GHOTIIO_DEFSSQL(gdefssql_dialect_check)
+#define gdefssql_keystore_backend GHOTIIO_DEFSSQL(gdefssql_keystore_backend)
 #define gdefssql_model_backend GHOTIIO_DEFSSQL(gdefssql_model_backend)
 #define gdefssql_query_compile GHOTIIO_DEFSSQL(gdefssql_query_compile)
 #define gdefssql_result_from_port GHOTIIO_DEFSSQL(gdefssql_result_from_port)
 #define gdefssql_result_string GHOTIIO_DEFSSQL(gdefssql_result_string)
 #define gdefssql_result_to_port GHOTIIO_DEFSSQL(gdefssql_result_to_port)
+#define gdefssql_store_version GHOTIIO_DEFSSQL(gdefssql_store_version)
 
 /// @endcond
 

@@ -728,3 +728,46 @@ GDEFSTOR_Result gdefssql_type_steps(GDEFSSQL_Cx * c, uint32_t tno,
   plan_free(&p);
   return rc;
 }
+
+/* ---- reading a store's layout version, for an executor's open ------------- */
+
+GDEFSTOR_Result gdefssql_store_version(const GDEFSSQL_Dialect * dialect,
+    const GDEFSSQL_Executor * executor, void * conn, const char * qualifier,
+    int kind, int64_t * out_version) {
+  GDEFSSQL_Back b;
+  GDEFSSQL_Cx c;
+  GDEFSTOR_Result rc;
+  int64_t v = 0;
+  int found = 0;
+  if (dialect == NULL || executor == NULL || conn == NULL ||
+      out_version == NULL ||
+      (kind != GDEFSSQL_STORE_DATA && kind != GDEFSSQL_STORE_KEYS) ||
+      executor->size != sizeof *executor || executor->prepare == NULL ||
+      executor->bind == NULL || executor->step == NULL ||
+      executor->column == NULL || executor->finalize == NULL ||
+      gdefssql_dialect_check(dialect) != GDEFSSQL_OK) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  if (qualifier != NULL && qualifier[0] != '\0' &&
+      !gdefssql_name_ok(qualifier, dialect->max_identifier)) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  memset(&b, 0, sizeof b);
+  b.alloc = gcu_allocator_default();
+  b.d = *dialect;
+  b.x = *executor;
+  memset(&c, 0, sizeof c);
+  c.b = &b;
+  c.conn = conn;
+  c.qual = qualifier != NULL && qualifier[0] != '\0' ? qualifier : NULL;
+  rc = read_one(&c, kind == GDEFSSQL_STORE_DATA ? "dss_schema" : "dsk_schema",
+      "version", &v, &found);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  if (found && v <= 0) {
+    return GDEFSTOR_ERR_CORRUPT;
+  }
+  *out_version = found ? v : 0;
+  return GDEFSTOR_OK;
+}

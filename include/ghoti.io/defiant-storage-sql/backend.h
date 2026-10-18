@@ -116,6 +116,40 @@ GDEFSSQL_API GDEFSSQL_Result gdefssql_model_backend(
     const GDEFSSQL_Dialect * dialect, const GDEFSSQL_Executor * executor,
     const GDEFSSQL_Allocator * allocator, GDEFSTOR_ModelBackend * out);
 
+/** Which layout gdefssql_store_version() reads. */
+typedef enum GDEFSSQL_StoreKind {
+  GDEFSSQL_STORE_DATA = 1, ///< A tenant's data store: `dss_schema`.
+  GDEFSSQL_STORE_KEYS      ///< A tenant's key store (keystore.h): `dsk_schema`.
+} GDEFSSQL_StoreKind;
+
+/**
+ * @brief Read the layout version a tenant's store records, so that an
+ * executor can refuse a store it must not serve before it hands a connection
+ * back from `open`.
+ *
+ * The backends check the version on the first write of a tenant; a read does
+ * not, and would read a newer layout as if it were this one. An executor that
+ * can see from the engine's catalog that the version table exists (for
+ * SQLite, a pragma) calls this on each new connection and refuses a version
+ * that is not ::GDEFSSQL_SCHEMA_VERSION (or ::GDEFSSQL_KEYSTORE_VERSION).
+ *
+ * It runs one `SELECT` through @p executor on @p conn, outside any
+ * transaction the caller has not opened; nothing is written.
+ *
+ * @param conn A connection @p executor opened (inside its `open` is allowed).
+ * @param qualifier What that `open` would return as the qualifier, or NULL.
+ * @param kind A ::GDEFSSQL_StoreKind.
+ * @param out_version Receives the recorded version, or 0 when the table holds
+ *   no row. Not written on failure.
+ * @return ::GDEFSTOR_OK, ::GDEFSTOR_ERR_INVALID (a NULL argument, an unknown
+ *   kind, a dialect that gdefssql_dialect_check() refuses), ::GDEFSTOR_ERR_OOM,
+ *   ::GDEFSTOR_ERR_CORRUPT (a version that is not a positive integer), or the
+ *   executor's error (a missing table is the engine's error).
+ */
+GDEFSSQL_API GDEFSTOR_Result gdefssql_store_version(
+    const GDEFSSQL_Dialect * dialect, const GDEFSSQL_Executor * executor,
+    void * conn, const char * qualifier, int kind, int64_t * out_version);
+
 #ifdef __cplusplus
 }
 #endif

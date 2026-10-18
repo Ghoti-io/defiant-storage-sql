@@ -21,6 +21,7 @@ plant_control testSchema 'Schema.*'
 plant_control testQuery 'Compile.*'
 plant_control testAgreement 'Agreement.*'
 plant_control testConformance 'ModelHistory.*:ModelDerived.*'
+plant_control testKeystore 'KeyStore.*'
 
 # An identifier made from the caller's field name, with the one gate on
 # identifiers (gdefssql_sb_ident's check) gone: caller text in SQL.
@@ -144,5 +145,27 @@ plant current-diverges src/backend.c testConformance \
     gdefssql_name_table(t, tno, GDEFSSQL_ROLE_CURRENT, cl->group);' \
   '  if (rc == GDEFSTOR_OK && cl->group == 0) {
     gdefssql_name_table(t, tno, GDEFSSQL_ROLE_CURRENT, cl->group);'
+
+# Erasure that destroys the key and writes no ledger row: the subject reads
+# as having no key instead of as erased, and nothing records the erasure for
+# a restore to replay.
+plant erasure-without-ledger src/keystore.c testKeystore \
+  'KeyStore.ErasureIsFinalAndLedgered KeyStore.ErasureDeletesTheKeyRowAndWritesTheLedgerRow' \
+  '    rc = insert(&c, "dsk_ledger", kv, 3);' \
+  '    (void)kv;'
+
+# Erasure that writes the ledger row and keeps the key row: the API reads the
+# subject as erased, so only the table shows the key is still stored.
+plant erasure-keeps-the-key src/keystore.c testKeystore \
+  'KeyStore.ErasureDeletesTheKeyRowAndWritesTheLedgerRow' \
+  '    rc = gdefssql_cx_run(&c, &sb);
+    gdefssql_sb_free(&sb);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = next_seq(&c, &seq);' \
+  '    gdefssql_sb_free(&sb);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = next_seq(&c, &seq);'
 
 plant_finish

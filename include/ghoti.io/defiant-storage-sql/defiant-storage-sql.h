@@ -34,5 +34,6 @@
 #include <ghoti.io/defiant-storage-sql/core.h>
 #include <ghoti.io/defiant-storage-sql/dialect.h>
 #include <ghoti.io/defiant-storage-sql/executor.h>
+#include <ghoti.io/defiant-storage-sql/keystore.h>
 
 #endif /* GHOTI_IO_GDEFSSQL_DEFIANT_STORAGE_SQL_H */
