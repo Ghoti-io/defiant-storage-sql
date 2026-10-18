@@ -1,0 +1,148 @@
+#!/bin/sh
+#
+# SPDX-License-Identifier: LGPL-3.0-only
+#
+# Show that each defect planted in the SQL layer turns a named test red: the
+# defects a shared schema generator and query compiler can commit, which the
+# tests exist to catch. Each plant edits a scratch copy of the real source
+# (tools/plant-lib.sh), so nothing in src/ selects a defect.
+#
+# Usage: check-sql.sh <make> <build-dir> [make args]
+
+set -u
+
+MAKE="${1:?usage: check-sql.sh <make> <build-dir> [make args]}"
+BUILD_DIR="${2:?usage: check-sql.sh <make> <build-dir> [make args]}"
+shift 2
+
+. tools/plant-lib.sh
+plant_setup "$MAKE" "$BUILD_DIR" "$@"
+plant_control testSchema 'Schema.*'
+plant_control testQuery 'Compile.*'
+plant_control testAgreement 'Agreement.*'
+plant_control testConformance 'ModelHistory.*:ModelDerived.*'
+
+# An identifier made from the caller's field name, with the one gate on
+# identifiers (gdefssql_sb_ident's check) gone: caller text in SQL.
+plantm unvalidated-identifier testSchema 'Schema.HostileNamesNeverReachSqlText' \
+  src/sql.c \
+  '  if (!gdefssql_name_ok(name, b->d->max_identifier)) {
+    b->rc = GDEFSTOR_ERR_INTERNAL;
+    return;
+  }
+  gdefssql_sb_kw(b, b->d->quote_open);' \
+  '  gdefssql_sb_kw(b, b->d->quote_open);' \
+  src/compile.c \
+  '    out->kind = SRC_FIELD;
+    out->owner = s;' \
+  '    out->kind = SRC_FIELD;
+    out->column = o->field;
+    out->owner = s;' \
+  src/compile.c \
+  '  char col[GDEFSSQL_NAME_CAP];
+  gdefssql_name_column(col, f->col, 0);
+  gdefssql_sb_col(q->sb, alias, col);' \
+  '  char col[GDEFSSQL_NAME_CAP];
+  gdefssql_name_column(col, f->col, 0);
+  gdefssql_sb_col(q->sb, alias, f->column != NULL ? f->column : col);'
+
+# An integer constant written into the text instead of bound.
+plantm value-concatenated testQuery 'Compile.EveryConstantIsABind' \
+  src/compile.c \
+  '#include <string.h>' \
+  '#include <stdio.h>
+#include <string.h>' \
+  src/compile.c \
+  '  GDEFSSQL_Datum d;
+  gdefssql_value_datum(v, &d);
+  gdefssql_sb_param(q->sb, &d);' \
+  '  GDEFSSQL_Datum d;
+  gdefssql_value_datum(v, &d);
+  if (d.kind == GDEFSSQL_DATUM_INT) {
+    char tmp[32];
+    snprintf(tmp, sizeof tmp, "%lld", (long long)d.integer);
+    gdefssql_sb_kw(q->sb, tmp);
+    return;
+  }
+  gdefssql_sb_param(q->sb, &d);'
+
+# The last clause of every AND dropped from the WHERE.
+plant dropped-where-clause src/compile.c testAgreement \
+  'Agreement.RandomQueriesMatchTheReferenceScan' \
+  '    for (i = 0; i < n->child_count; i++) {
+      if (i > 0) {
+        gdefssql_sb_kw(q->sb, n->op == GDEFSTOR_QUERY_AND ? " AND " : " OR ");' \
+  '    for (i = 0; i < n->child_count; i++) {
+      if (n->op == GDEFSTOR_QUERY_AND && i > 0 && i + 1 == n->child_count &&
+          n->children[i]->op != GDEFSTOR_QUERY_EXISTS) {
+        break;
+      }
+      if (i > 0) {
+        gdefssql_sb_kw(q->sb, n->op == GDEFSTOR_QUERY_AND ? " AND " : " OR ");'
+
+# A field that stops being indexed has its index dropped: a schema step
+# that is not additive.
+plant non-additive-step src/schema.c testSchema \
+  'Schema.EveryStepIsAdditive Schema.AddingAFieldIsOneAddColumnStep' \
+  '    if (w->indexed && have(&cat, w->grp, w->col, GDEFSSQL_ROLE_INDEX) == NULL) {
+      rc = add_index(c, tno, w, GDEFSSQL_ROLE_INDEX);
+    }' \
+  '    if (w->indexed && have(&cat, w->grp, w->col, GDEFSSQL_ROLE_INDEX) == NULL) {
+      rc = add_index(c, tno, w, GDEFSSQL_ROLE_INDEX);
+    } else if (!w->indexed &&
+               have(&cat, w->grp, w->col, GDEFSSQL_ROLE_INDEX) != NULL) {
+      GDEFSSQL_Sb sb;
+      char index[GDEFSSQL_NAME_CAP];
+      gdefssql_name_index(index, tno, GDEFSSQL_ROLE_INDEX, w->grp, w->col);
+      gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
+      gdefssql_sb_kw(&sb, "DROP INDEX ");
+      gdefssql_sb_ident(&sb, index);
+      rc = gdefssql_cx_exec(c, &sb);
+      gdefssql_sb_free(&sb);
+    }'
+
+# The total counted after the page: the page's length.
+plant count-after-limit src/backend.c testAgreement \
+  'Agreement.RandomQueriesMatchTheReferenceScan' \
+  '    gdefssql_st_close(&s);
+  }
+  gdefssql_sb_free(&total);' \
+  '    gdefssql_st_close(&s);
+    out->total = out->count;
+  }
+  gdefssql_sb_free(&total);'
+
+# The final tiebreak dropped from a sorted page.
+plant tiebreak-removed src/compile.c testAgreement \
+  'Agreement.RandomQueriesMatchTheReferenceScan' \
+  '  /* The final tiebreak, ascending under any sort: the row. */
+  gdefssql_sb_col(q->sb, main->e, "rid");' \
+  '  if (query->sort_count == 0) {
+    gdefssql_sb_col(q->sb, main->e, "rid");
+  } else {
+    q->sb->len -= 2;
+    q->sb->text[q->sb->len] = '"'"'\0'"'"';
+  }'
+
+# No value sorted last ascending and first descending.
+plant null-order-flipped src/compile.c testAgreement \
+  'Agreement.RandomQueriesMatchTheReferenceScan Agreement.RandomQueriesMatchTheReferenceScanInAnotherDialect' \
+  '      int want_first = !s->descending;' \
+  '      int want_first = s->descending;'
+
+# Closing a version closes every version of the item: valid_to written again.
+plant valid-to-twice src/backend.c testConformance \
+  'ModelHistory.ValidToIsWrittenOnce' \
+  '    bare_eq(&sb, " AND ", "vfrom", &from_rev);
+    rc = gdefssql_cx_run(c, &sb);' \
+  '    rc = gdefssql_cx_run(c, &sb);'
+
+# A removed nested item stays in its current table.
+plant current-diverges src/backend.c testConformance \
+  'ModelDerived.RebuildGivesTheSameCurrentState' \
+  '  if (rc == GDEFSTOR_OK) {
+    gdefssql_name_table(t, tno, GDEFSSQL_ROLE_CURRENT, cl->group);' \
+  '  if (rc == GDEFSTOR_OK && cl->group == 0) {
+    gdefssql_name_table(t, tno, GDEFSSQL_ROLE_CURRENT, cl->group);'
+
+plant_finish

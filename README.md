@@ -70,8 +70,12 @@ relies on an order it did not ask for answers wrongly.
   additively, hostile names, the column limit, layout versions, an engine
   error part way through a write.
 
-`make test` also runs `check-labels`, `check-seams` and `check-symbols`,
-each with plants of its own.
+`make test` also runs `check-sql`, which plants each defect the story names (an
+unvalidated identifier, a concatenated value, a dropped WHERE clause, a
+non-additive step, count after limit, the tiebreak removed, NULL order
+flipped, plus a `valid_to` written twice and a current table left stale) in a
+scratch copy of the source and requires a named test to fail for each;
+`check-labels`, `check-seams` and `check-symbols`, each with plants of its own.
 
 ## Status
 
