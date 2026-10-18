@@ -1,0 +1,7 @@
+Name: Ghoti.io Defiant Storage SQL(BRANCH)
+Description: The schema generator and query compiler the Defiant SQL storage backends share
+Version: (VERSION)
+URL: https://github.com/Ghoti-io/defiant-storage-sql
+Libs: -L(PC_LIB_DIR) -l(SUITE)-(PROJECT)(BRANCH)
+CFlags: -I(PC_INCLUDE_DIR)
+Requires: (REQUIRES)
