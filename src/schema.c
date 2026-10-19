@@ -256,6 +256,23 @@ GDEFSTOR_Result gdefssql_tenant_init(GDEFSSQL_Cx * c) {
   static const ColDef draft_cols[] = {{"pid", GDEFSSQL_COL_REFERENCE, 1},
       {"type", GDEFSSQL_COL_TEXT, 1}, {"base", GDEFSSQL_COL_ID, 1},
       {"body", GDEFSSQL_COL_BYTES, 1}};
+  /* Story S6a: records, counters (and each outbox stream's last sequence)
+   * and the outbox, with the outbox's public-id lookup. */
+  static const ColDef record_cols[] = {{"ns", GDEFSSQL_COL_TEXT, 1},
+      {"rkey", GDEFSSQL_COL_TEXT, 1}, {"body", GDEFSSQL_COL_BYTES, 1}};
+  static const ColDef seq_cols[] = {{"kind", GDEFSSQL_COL_ID, 1},
+      {"name", GDEFSSQL_COL_TEXT, 1}, {"last", GDEFSSQL_COL_ID, 1},
+      {"kept", GDEFSSQL_COL_ID, 1}};
+  static const ColDef outbox_cols[] = {{"stream", GDEFSSQL_COL_TEXT, 1},
+      {"seq", GDEFSSQL_COL_ID, 1}, {"pid", GDEFSSQL_COL_REFERENCE, 1},
+      {"fmt", GDEFSSQL_COL_TEXT, 1}, {"body", GDEFSSQL_COL_BYTES, 1},
+      {"lease", GDEFSSQL_COL_DATETIME, 1}, {"fails", GDEFSSQL_COL_ID, 1},
+      {"parked", GDEFSSQL_COL_BOOLEAN, 1}};
+  static const ColDef outbox_id_cols[] = {{"pid", GDEFSSQL_COL_REFERENCE, 1},
+      {"stream", GDEFSSQL_COL_TEXT, 1}, {"seq", GDEFSSQL_COL_ID, 1}};
+  static const char * const record_key[] = {"ns", "rkey"};
+  static const char * const seq_key[] = {"kind", "name"};
+  static const char * const outbox_key[] = {"stream", "seq"};
   static const char * const id_key[] = {"id"};
   static const char * const name_key[] = {"name"};
   static const char * const names_key[] = {"tno", "grp", "col", "role"};
@@ -290,6 +307,18 @@ GDEFSTOR_Result gdefssql_tenant_init(GDEFSSQL_Cx * c) {
   }
   if (rc == GDEFSTOR_OK) {
     rc = create_table(c, "dss_draft", draft_cols, 4, pid_key, 1);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = create_table(c, "dss_record", record_cols, 3, record_key, 2);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = create_table(c, "dss_seq", seq_cols, 4, seq_key, 2);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = create_table(c, "dss_outbox", outbox_cols, 8, outbox_key, 2);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = create_table(c, "dss_outbox_id", outbox_id_cols, 3, pid_key, 1);
   }
   if (rc == GDEFSTOR_OK) {
     rc = read_one(c, "dss_schema", "version", &v, &found);
@@ -351,6 +380,17 @@ GDEFSTOR_Result gdefssql_tenant_init(GDEFSSQL_Cx * c) {
       if (have(&cat, 0, k, GDEFSSQL_ROLE_TENANT_INDEX) == NULL) {
         rc = record(c, 0, 0, k, GDEFSSQL_ROLE_TENANT_INDEX, names[k],
             GDEFSSQL_KIND_PENDING);
+      }
+    }
+    /* The tables of story S6a are steps too: a store made before them gets
+     * them, and their records, at its next first write. */
+    {
+      static const char * const sys[4] = {"dss_record", "dss_seq",
+          "dss_outbox", "dss_outbox_id"};
+      for (k = 0; rc == GDEFSTOR_OK && k < 4; k++) {
+        if (have(&cat, 0, k, GDEFSSQL_ROLE_SYSTEM) == NULL) {
+          rc = record(c, 0, 0, k, GDEFSSQL_ROLE_SYSTEM, sys[k], 0);
+        }
       }
     }
     gdefssql_cat_free(&cat); /* zeroed by a failed load: freeing is safe */

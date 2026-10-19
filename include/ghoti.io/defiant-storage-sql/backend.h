@@ -33,7 +33,7 @@
  *
  * Every table name is generated: a prefix and a number, never a byte a caller
  * wrote. Per tenant (one database file, or one schema named by the
- * executor's qualifier) there are six tables of this library's own:
+ * executor's qualifier) there are ten tables of this library's own:
  *
  * | Table | Holds |
  * | --- | --- |
@@ -43,6 +43,10 @@
  * | `dss_name` | the mapping from each generated name to what it stores |
  * | `dss_entity` | derived: public id to row and type number |
  * | `dss_draft` | one draft per public id |
+ * | `dss_record` | records (story S6a) |
+ * | `dss_seq` | counters, and each outbox stream's last sequence |
+ * | `dss_outbox` | outbox rows, by stream and sequence |
+ * | `dss_outbox_id` | each outbox row by public id |
  *
  * and for each declared type, numbered `N` in the order types are first
  * declared, the tables of AD-14:
@@ -65,7 +69,10 @@
  * valid_from, field, subject, MAC, key id, normalization version), indexed by
  * `tN_bm (fld, mac)` for blind equality and the history lookup and by
  * `tN_bs (subject)` for erasure. It is truth while its subject exists:
- * `rebuild` leaves it alone, and the MAC is in no other table. Nothing is ever dropped or
+ * `rebuild` leaves it alone, and the MAC is in no other table. Records,
+ * counters and the outbox (story S6a) are four more tenant tables, `dss_record`,
+ * `dss_seq`, `dss_outbox` and `dss_outbox_id`, truth that `rebuild` leaves
+ * alone. Nothing is ever dropped or
  * retyped: a schema step creates a table, adds a nullable column or creates
  * an index, and each is recorded in `dss_name`, so a step already taken is
  * never taken again (documentation/sql.md has every column and index).
@@ -76,7 +83,10 @@
  * `begin_write`; reads with no transaction open a read connection and run
  * `begin_read`, so a query's total and its page come from one snapshot.
  * Schema steps of `type_store` run inside the write (the dialect must have
- * transactional DDL). The first write of a tenant in a backend's life first
+ * transactional DDL). Every write sets a savepoint after `begin_write`: an
+ * abort of a write that took a counter value rolls back to it, keeps the
+ * counter's floor and commits only that (documentation/sql.md, "Counters and
+ * aborts"). The first write of a tenant in a backend's life first
  * creates the six tenant tables in a transaction of their own (and, with
  * GDEFSSQL_Dialect::qualifier_create, the tenant's schema, first).
  *

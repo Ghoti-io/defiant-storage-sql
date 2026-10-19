@@ -91,7 +91,10 @@ enum {
   /* The blind index (AD-14), per type with a personal field: */
   GDEFSSQL_ROLE_BLIND = 13,         /* tN_b: one row per value version's MAC */
   GDEFSSQL_ROLE_BLIND_INDEX = 14,   /* tN_bm on tN_b (fld, mac) */
-  GDEFSSQL_ROLE_BLIND_SUBJECT = 15  /* tN_bs on tN_b (subject) */
+  GDEFSSQL_ROLE_BLIND_SUBJECT = 15, /* tN_bs on tN_b (subject) */
+  /* tno 0: the tenant tables of story S6a, col 0 dss_record, col 1 dss_seq,
+   * col 2 dss_outbox, col 3 dss_outbox_id */
+  GDEFSSQL_ROLE_SYSTEM = 16
 };
 
 /* dss_name.kind of a VALUE column: the field's logical type, plus this bit

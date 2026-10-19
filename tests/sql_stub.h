@@ -262,7 +262,8 @@ inline const std::set<std::string> & Keywords() {
       "OFFSET", "COUNT", "INSERT", "INTO", "VALUES", "UPDATE", "SET",
       "DELETE", "CREATE", "TABLE", "IF", "INDEX", "UNIQUE", "PRIMARY", "KEY",
       "ALTER", "ADD", "COLUMN", "RETURNING", "CONFLICT", "DO", "EXCLUDED",
-      "DUPLICATE", "CONCURRENTLY", "SCHEMA", "DROP"};
+      "DUPLICATE", "CONCURRENTLY", "SCHEMA", "DROP", "SAVEPOINT", "ROLLBACK",
+      "TO"};
   return k;
 }
 
@@ -278,7 +279,10 @@ inline bool KnownIdent(const std::string & s) {
       "vfrom", "vto", "parent", "ord", "dsk_schema", "dsk_counter",
       "dsk_key", "dsk_ledger", "dsk_ledger_seq", "dsk_sealed", "dsk_secret",
       "last_seq", "subject",
-      "secret", "fld", "mac", "kid", "norm"};
+      "secret", "fld", "mac", "kid", "norm",
+      /* story S6a */
+      "dss_record", "dss_seq", "dss_outbox", "dss_outbox_id", "dss_w", "ns",
+      "rkey", "last", "kept", "stream", "fmt", "lease", "fails", "parked"};
   if (fixed.count(s) != 0) {
     return true;
   }
@@ -517,7 +521,7 @@ struct Select {
 
 struct Stmt {
   enum K { CREATE_TABLE, CREATE_INDEX, ADD_COLUMN, INSERT, UPDATE, DELETE,
-      SELECT, CREATE_SCHEMA, DROP_INDEX };
+      SELECT, CREATE_SCHEMA, DROP_INDEX, SAVEPOINT, ROLLBACK_TO };
   K k = SELECT;
   std::string table;
   std::string index;
@@ -593,6 +597,14 @@ class Parser {
         s.names = Names();
         Punct(")");
       }
+    } else if (Kw("SAVEPOINT")) {
+      s.k = Stmt::SAVEPOINT;
+      s.index = Id();
+    } else if (Kw("ROLLBACK")) {
+      Want("TO");
+      Want("SAVEPOINT");
+      s.k = Stmt::ROLLBACK_TO;
+      s.index = Id();
     } else if (Kw("DROP")) {
       /* Only an index, and the engine allows only an invalid one. */
       Want("INDEX");
@@ -1204,6 +1216,7 @@ struct Conn {
   std::set<std::string> begin_indexes; /* the indexes the snapshot began with */
   std::string qual;
   int stmts = 0; /* prepared and not finalized: at most one (executor.h) */
+  std::map<std::string, Db> saves; /* the write's savepoints */
 };
 
 struct StmtH {
@@ -1574,6 +1587,9 @@ struct Engine {
     }
     case Stmt::SELECT:
       return RunSelect(cx, *s.select, fr);
+    case Stmt::SAVEPOINT:
+    case Stmt::ROLLBACK_TO:
+      throw std::runtime_error("a savepoint is run by exec, never prepared");
     }
     return res;
   }
@@ -1651,6 +1667,7 @@ inline GDEFSTOR_Result X_exec(void * ctx, void * conn, const char * sql,
       st.writer = true;
     }
     c->work = st.committed;
+    c->saves.clear();
     c->begin_indexes.clear();
     for (const auto & ix : st.committed.indexes) {
       c->begin_indexes.insert(ix.first);
@@ -1679,6 +1696,7 @@ inline GDEFSTOR_Result X_exec(void * ctx, void * conn, const char * sql,
       st.writer = false;
     }
     c->work = Db();
+    c->saves.clear();
     c->in_txn = false;
     return GDEFSTOR_OK;
   }
@@ -1688,6 +1706,23 @@ inline GDEFSTOR_Result X_exec(void * ctx, void * conn, const char * sql,
       throw std::runtime_error("exec of a statement with parameters");
     }
     Stmt s = Parser(lx, c->qual).Statement();
+    if (s.k == Stmt::SAVEPOINT || s.k == Stmt::ROLLBACK_TO) {
+      /* A savepoint is a copy of the write's state; rolling back to it puts
+       * that copy back and keeps the savepoint, as SQL does. */
+      if (!c->in_txn || !c->write) {
+        throw std::runtime_error("a savepoint outside a write: " + text);
+      }
+      if (s.k == Stmt::SAVEPOINT) {
+        c->saves[s.index] = c->work;
+      } else {
+        auto sv = c->saves.find(s.index);
+        if (sv == c->saves.end()) {
+          throw std::runtime_error("no such savepoint: " + text);
+        }
+        c->work = sv->second;
+      }
+      return GDEFSTOR_OK;
+    }
     /* The key store is a port of its own: its one index is made with its
      * table, in its first transaction (keystore.c says why). */
     bool keystore = s.table.rfind("dsk_", 0) == 0;

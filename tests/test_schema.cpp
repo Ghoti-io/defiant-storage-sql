@@ -31,6 +31,7 @@
 #include "test_util.h"
 
 #include <random>
+#include <set>
 
 using namespace tu;
 
@@ -853,6 +854,91 @@ TEST(Dialect, CheckRefusesWhatCouldCorruptTheText) {
     EXPECT_EQ(b.want, gdefssql_dialect_check(&x)) << b.why;
   }
   EXPECT_EQ(GDEFSSQL_ERR_INVALID, gdefssql_dialect_check(nullptr));
+}
+
+/* Story S6a: records, counters and the outbox are four tenant tables, each a
+ * step recorded in dss_name (role 16) like every other, made by the tenant's
+ * first write and never by a declaration. */
+TEST_F(Schema, TheSystemTablesAreRecordedStepsOfTheTenant) {
+  Open(sqlstub::StdDialect());
+  ASSERT_EQ(GDEFSTOR_OK, InWrite(rig.store, [](GDEFSTOR_Write * w) {
+    return gdefstor_record_put(w, "core.m", 6, "k", 1,
+        reinterpret_cast<const uint8_t *>("v"), 1);
+  }));
+  const sqlstub::Db & db = rig.engine->stores[kTenant].committed;
+  std::set<std::string> recorded;
+  const sqlstub::Table & names = *db.tables.at("dss_name");
+  for (const auto & row : names.rows) {
+    if (row[(size_t)names.Find("role")].i == 16) {
+      EXPECT_EQ(0, row[(size_t)names.Find("tno")].i);
+      recorded.insert(row[(size_t)names.Find("name")].s);
+    }
+  }
+  const std::set<std::string> want = {"dss_record", "dss_seq", "dss_outbox",
+      "dss_outbox_id"};
+  EXPECT_EQ(want, recorded);
+  for (const std::string & t : want) {
+    EXPECT_EQ(1u, db.tables.count(t)) << t;
+  }
+  /* A declaration takes no step of these. */
+  size_t from = Mark();
+  ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.order", {Field("x", T)}));
+  for (const std::string & ddl : DdlSince(*rig.engine, from)) {
+    EXPECT_EQ(std::string::npos, ddl.find("\"dss_")) << ddl;
+  }
+}
+
+/* An abort of a write that took a counter goes back to the write's savepoint,
+ * keeps the counter's floor and commits that alone; an abort that took none
+ * is a plain rollback. Every write sets the savepoint right after BEGIN. */
+TEST_F(Schema, AnAbortKeepsCounterFloorsThroughTheWritesSavepoint) {
+  Open(sqlstub::StdDialect());
+  ASSERT_EQ(GDEFSTOR_OK, InWrite(rig.store, [](GDEFSTOR_Write * w) {
+    return gdefstor_record_put(w, "core.m", 6, "k", 1,
+        reinterpret_cast<const uint8_t *>("v"), 1);
+  }));
+  for (int take = 0; take < 2; take++) {
+    size_t from = Mark();
+    GDEFSTOR_Write * w = nullptr;
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(rig.store, kTenant, 2, nullptr,
+        &w));
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_record_put(w, "core.m", 6, "k", 1,
+        reinterpret_cast<const uint8_t *>("x"), 1));
+    uint64_t v = 0;
+    if (take) {
+      ASSERT_EQ(GDEFSTOR_OK, gdefstor_counter_next(w, "core.epoch", 10, &v));
+    }
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_abort(w));
+    std::vector<std::string> txn;
+    for (size_t i = from; i < rig.engine->log.size(); i++) {
+      const std::string & t = rig.engine->log[i].text;
+      if (t == "BEGIN IMMEDIATE" || t == "COMMIT" || t == "ROLLBACK" ||
+          t.rfind("SAVEPOINT", 0) == 0 || t.rfind("ROLLBACK TO", 0) == 0) {
+        txn.push_back(t);
+      }
+    }
+    std::vector<std::string> want = {"BEGIN IMMEDIATE", "SAVEPOINT \"dss_w\""};
+    if (take) {
+      want.push_back("ROLLBACK TO SAVEPOINT \"dss_w\"");
+      want.push_back("COMMIT");
+    } else {
+      want.push_back("ROLLBACK");
+    }
+    EXPECT_EQ(want, txn) << take;
+    const sqlstub::Table & rec = *rig.engine->stores[kTenant].committed.tables.at(
+        "dss_record");
+    ASSERT_EQ(1u, rec.rows.size());
+    EXPECT_EQ("v", rec.rows[0][(size_t)rec.Find("body")].s);
+  }
+  uint64_t peek = 9;
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_counter_peek(rig.store, kTenant, 2,
+      "core.epoch", 10, &peek));
+  EXPECT_EQ(0u, peek);
+  ASSERT_EQ(GDEFSTOR_OK, InWrite(rig.store, [](GDEFSTOR_Write * w) {
+    uint64_t v = 0;
+    GDEFSTOR_Result rc = gdefstor_counter_next(w, "core.epoch", 10, &v);
+    return rc == GDEFSTOR_OK && v != 2 ? GDEFSTOR_ERR_INTERNAL : rc;
+  }));
 }
 
 TEST(Dialect, ABackendNeedsACompleteExecutor) {

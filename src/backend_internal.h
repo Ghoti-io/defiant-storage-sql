@@ -56,6 +56,11 @@ typedef struct GDEFSSQL_Back {
   GDEFSSQL_Executor x;
   struct GDEFSSQL_Ready * ready; /* tenants whose six tables are known made */
   struct GDEFSSQL_Txn * open;    /* open writes, one per tenant at most */
+  /* The write's savepoint, set after BEGIN and rolled back to by an abort
+   * that keeps counters (story S6a): built once, so that an abort needs no
+   * allocation to undo the write. */
+  char * sp_set;
+  char * sp_undo;
 } GDEFSSQL_Back;
 
 /* A connection in use. */

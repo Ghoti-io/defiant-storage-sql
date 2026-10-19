@@ -18,6 +18,8 @@ No identifier is built from caller text. Every identifier is one of:
 | Form | What |
 | --- | --- |
 | `dss_schema`, `dss_counter`, `dss_type`, `dss_name`, `dss_entity`, `dss_draft` | the six tenant tables |
+| `dss_record`, `dss_seq`, `dss_outbox`, `dss_outbox_id` | the tenant tables of records, counters and the outbox (story S6a) |
+| `dss_w` | the savepoint every write sets after its `BEGIN` |
 | `dss_type_tno`, `dss_entity_rid` | their unique indexes |
 | `tN_e`, `tN_s`, `tN_r`, `tN_n` | type N's entity, state, revision and newest-state tables |
 | `tN_gG`, `tN_cG` | type N's item versions and current items of group G |
@@ -27,7 +29,7 @@ No identifier is built from caller text. Every identifier is one of:
 | `tN_b` | type N's blind table (AD-14), for a type with a personal field |
 | `tN_bm`, `tN_bs` | indexes on `tN_b (fld, mac)` and `tN_b (subject)` |
 | `vC`, `vCs` | column C of a group, and its subject column |
-| fixed column names | `rid pid creator created rev last_item seq pub del actor at cseq who why ent item vfrom vto parent ord id version last_row last_type last_cseq name tno decl grp col role kind type base body fld subject mac kid norm` |
+| fixed column names | `rid pid creator created rev last_item seq pub del actor at cseq who why ent item vfrom vto parent ord id version last_row last_type last_cseq name tno decl grp col role kind type base body fld subject mac kid norm ns rkey last kept stream fmt lease fails parked` |
 | `aK` | a table alias in one statement |
 | `dsk_schema`, `dsk_counter`, `dsk_key`, `dsk_ledger`, `dsk_sealed`, `dsk_secret`, `dsk_ledger_seq` | the key store's tables and index (section 8), never in a data store |
 | `subject secret last_seq` | the key store's column names |
@@ -46,7 +48,9 @@ column and index to what it holds: `role` is 1 entity, 2 state, 3 revision,
 column, 9 field index, 10 subject index, 11 the entity lookup `tNp`, 12 one
 of the tenant tables' two indexes (`tno` 0; `col` 0 `dss_type_tno`, 1
 `dss_entity_rid`), 13 the blind table, 14 its MAC index, 15 its subject
-index (the last three at `grp` 0, `col` 0); `kind` is a value column's logical type, plus 256 for a
+index (the last three at `grp` 0, `col` 0), 16 one of the tenant tables of
+story S6a (`tno` 0, `grp` 0; `col` 0 `dss_record`, 1 `dss_seq`, 2
+`dss_outbox`, 3 `dss_outbox_id`); `kind` is a value column's logical type, plus 256 for a
 personal field, and an index's 0 once it is built, 512 while it is pending
 (section 3).
 
@@ -62,6 +66,16 @@ Per tenant:
 | `dss_name` | as above | `tno, grp, col, role` |
 | `dss_entity` | `pid` REFERENCE, `rid`, `tno` (derived) | `pid` |
 | `dss_draft` | `pid` REFERENCE, `type` TEXT, `base`, `body` BYTES | `pid` |
+| `dss_record` | `ns` TEXT, `rkey` TEXT, `body` BYTES: a record (model.h) | `ns, rkey` |
+| `dss_seq` | `kind` (1 a counter, 2 an outbox stream), `name` TEXT, `last` (the committed value), `kept` (the counter's floor) | `kind, name` |
+| `dss_outbox` | `stream` TEXT, `seq`, `pid` REFERENCE, `fmt` TEXT, `body` BYTES, `lease` (ms, 0 never claimed), `fails`, `parked` BOOLEAN | `stream, seq` |
+| `dss_outbox_id` | `pid` REFERENCE, `stream` TEXT, `seq`: each outbox row by public id | `pid` |
+
+The last four are truth, all of them: `rebuild` never touches them. They have
+no secondary index: a record is read and listed by its key, a counter by its
+key, a claim by the stream's prefix of the outbox's key (and its live-lease
+check reads the stream's undelivered rows, which delivery deletes), and a
+delivery or a failure finds its row through `dss_outbox_id`.
 
 Per type N, truth:
 
@@ -122,6 +136,10 @@ declaration that would exceed the dialect's column limit is
 backend's life creates the six tenant tables in a transaction of its own, then
 checks `dss_schema.version`: another version is refused
 (`GDEFSTOR_ERR_UNSUPPORTED` for a newer one, `GDEFSTOR_ERR_FORMAT` otherwise).
+The four tables of story S6a are made in the same transaction and recorded
+(role 16) when their records are missing, so a store made before them gains
+them at its first write in a backend's life; a read of such a store before
+that write finds no table (the engine's error). The layout version stays 1.
 
 The steps of a declaration run inside the write that declares it, so a dialect
 must have transactional DDL (SQLite and Postgres do). A dialect without it is
@@ -176,6 +194,8 @@ Besides the steps, every statement is one of these forms. Every value is a
 parameter; the only other words are the fixed vocabulary.
 
 ```
+SAVEPOINT dss_w
+ROLLBACK TO SAVEPOINT dss_w
 INSERT INTO t (c, ...) VALUES (?, ...)
 INSERT INTO t (c, ...) VALUES (?, ...) ON CONFLICT (k) DO UPDATE SET c = EXCLUDED.c, ...
 INSERT INTO t (c, ...) VALUES (?, ...) ON DUPLICATE KEY UPDATE c = VALUES(c), ...
@@ -189,7 +209,8 @@ SELECT COUNT(*) FROM ...
 
 | Operation | Statements |
 | --- | --- |
-| `begin` | `begin_write` (first time per tenant: the tenant tables first, then the index sweep) |
+| `begin` | `begin_write` (first time per tenant: the tenant tables first, then the index sweep), then `SAVEPOINT dss_w` |
+| `abort` | the dialect's `rollback`; when the write took a counter value, instead `ROLLBACK TO SAVEPOINT dss_w`, each counter's `kept` raised to the highest value the write took (select, then update or insert), and `commit` |
 | `type_load` | `SELECT decl FROM dss_type WHERE name = ?` |
 | `type_store` | the type number, the upserted declaration, the steps (indexes recorded pending) |
 | `commit` | the dialect's `commit`; then, when a step recorded an index or one is still pending, the index sweep (section 3) |
@@ -205,12 +226,40 @@ SELECT COUNT(*) FROM ...
 | `subject_lookup` | `dss_name` by role 8 (every subject column), then for each `SELECT ... FROM tN_gG a0 JOIN tN_e a1 ON a1.rid = a0.ent WHERE a0.vCs = ?`, by `tN_jG_C`; never `tN_b` |
 | `blind_delete` | `dss_name` by role 13 (every blind table), then for each `DELETE FROM tN_b WHERE subject = ?`, by `tN_bs` |
 | drafts | upsert, select, delete on `dss_draft` |
+| records | upsert on `dss_record`; select by `ns, rkey`; delete after a select; a list `WHERE ns = ? AND rkey >= ? AND rkey < ? ORDER BY ns, rkey LIMIT ? OFFSET ?` (the upper bound is the prefix with its last byte one higher) |
+| `counter_next` | `SELECT last, kept FROM dss_seq WHERE kind = ? AND name = ?`, then the update or insert of `last` |
+| `outbox_insert` | `dss_outbox_id` by `pid` (one found is `GDEFSTOR_ERR_INVALID`, with no failed statement); an insert into each table |
+| `outbox_claim` | `SELECT COUNT(*) ... WHERE parked = ? AND stream = ? AND lease > ?`; when 0, `SELECT ... WHERE stream = ? AND parked = ? ORDER BY seq LIMIT ? OFFSET ?` and an update of each row's `lease` |
+| `outbox_delete`, `outbox_fail` | `dss_outbox_id` by `pid`, the row's `fails` and `parked`, then the deletes from both tables (never of a parked row) or one update |
+| `outbox_parked` | `SELECT COUNT(*) FROM dss_outbox WHERE parked = ? [AND stream = ?]` |
 | `query` | the compiled total and page, in one read transaction |
-| `rebuild` | `dss_entity` and every `tN_n` and `tN_cG` emptied and refilled from the truth; `tN_b` is not touched |
+| `rebuild` | `dss_entity` and every `tN_n` and `tN_cG` emptied and refilled from the truth; `tN_b` and the tables of story S6a are not touched |
 | `dump` | every table read in key order |
 
 A read without the write's transaction opens a read connection and runs
 `begin_read`, so everything one call reads is one snapshot.
+
+**Counters and aborts.** A counter value is never handed out twice (model.h):
+the value an aborted write took is skipped. `counter_next` writes `last` in
+the write; the abort goes back to the write's savepoint, which undoes
+everything the write did, raises `kept` to the value taken and commits only
+that, on the connection the write held. On an engine with one writer per
+store (SQLite) no other writer can come between, so the floor is in place
+before anyone reads the counter again. Two limits remain, which are
+documented rather than built around:
+
+- On an engine where writers of one tenant run at once (Postgres, from two
+  stores or nodes), a writer that was waiting on the counter's row when the
+  aborting write rolled back to its savepoint may take the same value before
+  the floor is written: rolling back to a savepoint releases the row. The
+  values committed are still never repeated (`SERIALIZABLE` makes one of two
+  writers that took one value fail), but an aborted writer and a committed one
+  can have held the same number. Closing it needs a reservation outside the
+  write (what a Postgres sequence is), which the dialect interface does not
+  have.
+- An abort whose own statements fail (an I/O error, a full allocator) cannot
+  keep the floor, and neither can a crash before the abort runs; nothing was
+  committed then, but the value may be taken again.
 
 ## 5. The query compiler
 

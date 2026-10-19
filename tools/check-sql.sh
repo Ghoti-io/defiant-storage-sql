@@ -24,6 +24,7 @@ plant_control testConformance 'ModelHistory.*:ModelDerived.*'
 plant_control testKeystore 'KeyStore.*'
 plant_control testConformance 'ModelBlind.*'
 plant_control testBlind 'BlindSql.*'
+plant_control testConformance 'ModelRecords.*:ModelCounters.*:ModelOutbox.*:ModelSystem.*'
 
 # An identifier made from the caller's field name, with the one gate on
 # identifiers (gdefssql_sb_ident's check) gone: caller text in SQL.
@@ -250,6 +251,72 @@ plant rebuild-clears-blind src/backend.c testConformance \
     if (rc == GDEFSTOR_OK && cat_blind(&cat)) {
       gdefssql_name_table(t, tno, GDEFSSQL_ROLE_BLIND, 0);
       rc = delete_all(c, t);
+    }'
+
+# Records, counters and the outbox (story S6a) --------------------------------
+
+# The write's savepoint taken lazily, at its first counter: what the write did
+# before it is outside what an abort undoes, so a record written then is kept
+# by the abort that keeps the counter.
+plant record-outside-transaction src/backend.c testConformance \
+  'ModelRecords.AnAbortedWriteLeavesNoRecord' \
+  '      rc = txn_sql(&c, b->sp_set);' \
+  '      rc = GDEFSTOR_OK;' \
+  '  rc = seq_write(&x->cx, kind, name, name_len, found, "last", base + 1);' \
+  '  if (x->ntaken == 0 && kind == GDEFSTOR_MODEL_COUNTER) {
+    rc = txn_sql(&x->cx, x->b->sp_set);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = seq_write(&x->cx, kind, name, name_len, found, "last", base + 1);
+  }'
+
+# An abort that rolls everything back, the counters too: the value an aborted
+# write took is handed out again.
+plant counter-reuses-aborted-value src/backend.c testConformance \
+  'ModelCounters.AnAbortedWritesValueIsSkippedNotReused' \
+  '  if (x->ntaken == 0) {
+    return txn_sql(&x->cx, b->d.rollback);
+  }' \
+  '  if (x->ntaken == 0 || 1) {
+    return txn_sql(&x->cx, b->d.rollback);
+  }'
+
+# A claim that takes the stream's newest rows first.
+plant claim-out-of-order src/backend.c testConformance \
+  'ModelOutbox.ThreeAppendsAreClaimedInSequence' \
+  '    gdefssql_sb_kw(&sb, " ORDER BY ");
+    gdefssql_sb_col(&sb, "a0", "seq");
+    gdefssql_sb_kw(&sb, " LIMIT ");' \
+  '    gdefssql_sb_kw(&sb, " ORDER BY ");
+    gdefssql_sb_col(&sb, "a0", "seq");
+    gdefssql_sb_kw(&sb, " DESC LIMIT ");'
+
+# The live-lease count read and then not looked at.
+plant double-claim-under-live-lease src/backend.c testConformance \
+  'ModelOutbox.ASecondClaimerDuringALiveLeaseGetsNothing' \
+  '  if (rc != GDEFSTOR_OK || live > 0) {' \
+  '  if (rc != GDEFSTOR_OK) {'
+
+# A row that reaches the threshold deleted instead of parked.
+plant parked-row-deleted src/backend.c testConformance \
+  'ModelOutbox.AFailingRowIsParkedCountedNeverClaimedAndKept' \
+  '    parked = fails + 1 >= (int64_t)park_at;' \
+  '    parked = fails + 1 >= (int64_t)park_at;
+    if (parked) {
+      int gone = 0;
+      gcu_allocator_free(x->b->alloc, stream);
+      *out_found = 1;
+      *out_parked = 1;
+      return m_outbox_delete(ctx, txn, public_id, public_id_len, &gone);
+    }'
+
+# Records treated as derived: a rebuild deletes them.
+plant rebuild-clears-records src/backend.c testConformance \
+  'ModelSystem.RebuildLeavesRecordsCountersAndTheOutboxAlone' \
+  '    rc = delete_all(&x->cx, "dss_entity");' \
+  '    rc = delete_all(&x->cx, "dss_entity");
+    if (rc == GDEFSTOR_OK) {
+      rc = delete_all(&x->cx, "dss_record");
     }'
 
 plant_finish
