@@ -133,6 +133,33 @@ TEST_F(KeyStore, ErasureDeletesTheKeyRowAndWritesTheLedgerRow) {
   EXPECT_EQ(1u, ledger->rows.size());
 }
 
+/* Sealed material is a key like the others: the erasure deletes its row in
+ * the same write as the ledger row, and a restore replaying the ledger does
+ * the same. */
+TEST_F(KeyStore, ErasureDeletesTheSealedRowToo) {
+  const uint8_t m[3] = {7, 8, 9};
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_keystore_subject_put(ks, "t1", 2, "s1", 2, m,
+      3));
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_keystore_subject_put(ks, "t1", 2, "s2", 2, m,
+      3));
+  const sqlstub::Table * sealed = TableOf(ks, "t1", "dsk_sealed");
+  ASSERT_NE(nullptr, sealed);
+  EXPECT_EQ(2u, sealed->rows.size());
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_keystore_erase(ks, "t1", 2, "s1", 2, 5));
+  sealed = TableOf(ks, "t1", "dsk_sealed");
+  ASSERT_NE(nullptr, sealed);
+  EXPECT_FALSE(HasSubject(sealed, "s1"));
+  EXPECT_TRUE(HasSubject(sealed, "s2"));
+  const std::string set =
+      "defiant-keyset/1\ntaken 1\nledger s2 6\n";
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_keystore_import(ks, "t1", 2,
+      reinterpret_cast<const uint8_t *>(set.data()), set.size()));
+  sealed = TableOf(ks, "t1", "dsk_sealed");
+  ASSERT_NE(nullptr, sealed);
+  EXPECT_EQ(0u, sealed->rows.size());
+  EXPECT_EQ(2u, TableOf(ks, "t1", "dsk_ledger")->rows.size());
+}
+
 /* The key the cipher's randomness made is the bytes stored, and a tenant's
  * keys are its own: another tenant has no key for the same subject. */
 TEST_F(KeyStore, KeysAreKeptPerTenant) {

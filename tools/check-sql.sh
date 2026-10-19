@@ -184,22 +184,22 @@ plant current-diverges src/backend.c testConformance \
 # a restore to replay.
 plant erasure-without-ledger src/keystore.c testKeystore \
   'KeyStore.ErasureIsFinalAndLedgered KeyStore.ErasureDeletesTheKeyRowAndWritesTheLedgerRow' \
-  '    rc = insert(&c, "dsk_ledger", kv, 3);' \
+  '    rc = insert(c, "dsk_ledger", kv, 3);' \
   '    (void)kv;'
 
 # Erasure that writes the ledger row and keeps the key row: the API reads the
 # subject as erased, so only the table shows the key is still stored.
 plant erasure-keeps-the-key src/keystore.c testKeystore \
   'KeyStore.ErasureDeletesTheKeyRowAndWritesTheLedgerRow' \
-  '    rc = gdefssql_cx_run(&c, &sb);
+  '    rc = gdefssql_cx_run(c, &sb);
     gdefssql_sb_free(&sb);
   }
   if (rc == GDEFSTOR_OK) {
-    rc = next_seq(&c, &seq);' \
+    rc = delete_subject(c, "dsk_sealed", subject);' \
   '    gdefssql_sb_free(&sb);
   }
   if (rc == GDEFSTOR_OK) {
-    rc = next_seq(&c, &seq);'
+    rc = delete_subject(c, "dsk_sealed", subject);'
 
 # The blind index (story S5a). A MAC written into a revision row: the first
 # blind row's MAC as the revision's reason.

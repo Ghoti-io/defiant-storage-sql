@@ -22,9 +22,9 @@
  * @file
  *
  * The key store backend over a dialect and an executor (keystore.h): subject
- * keys and the erasure ledger in four tables of their own, written with the
- * same statement builder as the entity backend, so every value is bound and
- * every identifier is a fixed name.
+ * keys, sealed material, tenant secrets and the erasure ledger in six tables
+ * of their own, written with the same statement builder as the entity
+ * backend, so every value is bound and every identifier is a fixed name.
  */
 
 #include <ghoti.io/defiant-storage-sql/macros.h>
@@ -128,6 +128,7 @@ typedef struct KRead {
   uint8_t * buf;
   size_t cap;
   size_t len;
+  int any_len; /* bytes of 1 to cap, rather than exactly cap */
 } KRead;
 
 static GDEFSTOR_Result read_by(Cx * c, const char * table, const char * col,
@@ -160,7 +161,9 @@ static GDEFSTOR_Result read_by(Cx * c, const char * table, const char * col,
       const uint8_t * p = NULL;
       size_t n = 0;
       rc = gdefssql_st_bytes(&s, 0, out->kind, &p, &n, NULL);
-      if (rc == GDEFSTOR_OK && (out->buf == NULL || n != out->cap)) {
+      if (rc == GDEFSTOR_OK &&
+          (out->buf == NULL ||
+              (out->any_len ? n == 0 || n > out->cap : n != out->cap))) {
         /* A key of another length than the cipher's is not this store's. */
         rc = GDEFSTOR_ERR_CORRUPT;
       }
@@ -206,7 +209,7 @@ static GDEFSTOR_Result insert(Cx * c, const char * table, const KKv * kv,
   return rc;
 }
 
-/* The four tables, their index and their rows, if missing (with the
+/* The six tables, their index and their rows, if missing (with the
  * dialect's qualifier_create, the tenant's schema first), and the version
  * check. Runs inside a write transaction.
  *
@@ -224,6 +227,10 @@ static GDEFSTOR_Result tenant_init(Cx * c) {
       {"secret", GDEFSSQL_COL_BYTES}};
   static const KCol ledger_cols[] = {{"subject", GDEFSSQL_COL_REFERENCE},
       {"seq", GDEFSSQL_COL_ID}, {"at", GDEFSSQL_COL_DATETIME}};
+  static const KCol sealed_cols[] = {{"subject", GDEFSSQL_COL_REFERENCE},
+      {"secret", GDEFSSQL_COL_BYTES}};
+  static const KCol secret_cols[] = {{"name", GDEFSSQL_COL_REFERENCE},
+      {"secret", GDEFSSQL_COL_BYTES}};
   GDEFSSQL_Datum one = dint(1);
   KRead r;
   GDEFSTOR_Result rc;
@@ -249,6 +256,14 @@ static GDEFSTOR_Result tenant_init(Cx * c) {
   }
   if (rc == GDEFSTOR_OK) {
     rc = create_table(c, "dsk_ledger", ledger_cols, 3, "subject");
+  }
+  /* Sealed material and tenant secrets (story S5b). A key store made before
+   * them gains them here, at its first write in a backend's life. */
+  if (rc == GDEFSTOR_OK) {
+    rc = create_table(c, "dsk_sealed", sealed_cols, 2, "subject");
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = create_table(c, "dsk_secret", secret_cols, 2, "name");
   }
   if (rc == GDEFSTOR_OK) {
     Sb sb;
@@ -445,12 +460,39 @@ static GDEFSTOR_Result w_open(KBack * k, const char * t, size_t n, Cx * c) {
   return rc;
 }
 
-/* Commit (or, after an error, roll back) and return the connection. */
-static GDEFSTOR_Result w_close(KBack * k, Cx * c, GDEFSTOR_Result rc) {
+/* After an erasure commits, on the same connection and outside any
+ * transaction: the dialect's vacuum of the tables a destroyed key was in
+ * (dialect.h, key_vacuum). */
+static GDEFSTOR_Result vacuum_keys(KBack * k, Cx * c) {
+  static const char * const tables[] = {"dsk_key", "dsk_sealed"};
+  GDEFSTOR_Result rc = GDEFSTOR_OK;
+  size_t i;
+  if (k->b.d.key_vacuum == NULL) {
+    return GDEFSTOR_OK;
+  }
+  for (i = 0; rc == GDEFSTOR_OK && i < sizeof tables / sizeof tables[0]; i++) {
+    Sb sb;
+    gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
+    gdefssql_sb_kw(&sb, k->b.d.key_vacuum);
+    gdefssql_sb_table(&sb, tables[i]);
+    rc = gdefssql_cx_exec(c, &sb);
+    gdefssql_sb_free(&sb);
+  }
+  return rc;
+}
+
+/* Commit (or, after an error, roll back), vacuum when an erasure committed and
+ * asked for it, and return the connection. */
+static GDEFSTOR_Result w_finish(KBack * k, Cx * c, GDEFSTOR_Result rc,
+    int vacuum) {
   if (rc == GDEFSTOR_OK && !c->failed) {
     rc = txn_sql(c, k->b.d.commit);
     if (rc != GDEFSTOR_OK) {
       txn_sql(c, k->b.d.rollback);
+    } else if (vacuum) {
+      /* The erasure stands whatever this does; a failure is reported so the
+       * caller knows the old pages may still hold the key. */
+      rc = vacuum_keys(k, c);
     }
   } else {
     txn_sql(c, k->b.d.rollback);
@@ -462,6 +504,10 @@ static GDEFSTOR_Result w_close(KBack * k, Cx * c, GDEFSTOR_Result rc) {
   k->b.x.close(k->b.x.ctx, c->conn, c->failed);
   c->conn = NULL;
   return rc;
+}
+
+static GDEFSTOR_Result w_close(KBack * k, Cx * c, GDEFSTOR_Result rc) {
+  return w_finish(k, c, rc, 0);
 }
 
 /* A read connection in one read transaction; *out_empty when the tenant has
@@ -531,6 +577,25 @@ static GDEFSTOR_Result erased_or_key(Cx * c, const GDEFSSQL_Datum * subject,
       out_has_key);
 }
 
+/* Whether the subject has sealed material (it is not read). */
+static GDEFSTOR_Result has_sealed(Cx * c, const GDEFSSQL_Datum * subject,
+    int * out) {
+  KRead r;
+  GDEFSTOR_Result rc;
+  memset(&r, 0, sizeof r);
+  r.kind = GDEFSSQL_DATUM_BYTES;
+  r.cap = GDEFSTOR_KEYSTORE_MAX_MATERIAL_BYTES;
+  r.any_len = 1;
+  r.buf = (uint8_t *)gcu_allocator_malloc(c->b->alloc, r.cap);
+  if (r.buf == NULL) {
+    return GDEFSTOR_ERR_OOM;
+  }
+  rc = read_by(c, "dsk_sealed", "secret", "subject", subject, &r, out);
+  wipe(r.buf, r.cap);
+  gcu_allocator_free(c->b->alloc, r.buf);
+  return rc;
+}
+
 static GDEFSTOR_Result k_create(void * ctx, const char * t, size_t tl,
     const char * s, size_t sl) {
   KBack * k = (KBack *)ctx;
@@ -555,8 +620,12 @@ static GDEFSTOR_Result k_create(void * ctx, const char * t, size_t tl,
     return rc;
   }
   rc = erased_or_key(&c, &subject, &erased, &key, &has);
+  if (rc == GDEFSTOR_OK && !erased && !has) {
+    rc = has_sealed(&c, &subject, &has);
+  }
   if (rc == GDEFSTOR_OK && (erased || has)) {
-    /* It has a key, or was erased: nothing written, and not a failed write. */
+    /* It has a key or material, or was erased: nothing written, and not a
+     * failed write. */
     wipe(secret, k->cipher.key_bytes);
     rc = w_close(k, &c, GDEFSTOR_OK);
     gcu_allocator_free(k->b.alloc, secret);
@@ -634,54 +703,89 @@ static GDEFSTOR_Result k_unwrap(void * ctx, const char * t, size_t tl,
       out_len);
 }
 
-static GDEFSTOR_Result k_erase(void * ctx, const char * t, size_t tl,
-    const char * s, size_t sl, int64_t when) {
-  KBack * k = (KBack *)ctx;
-  GDEFSSQL_Datum subject = dbytes(GDEFSSQL_DATUM_TEXT, s, sl);
+/* DELETE FROM <table> WHERE subject = ? */
+static GDEFSTOR_Result delete_subject(Cx * c, const char * table,
+    const GDEFSSQL_Datum * subject) {
+  Sb sb;
+  GDEFSTOR_Result rc;
+  gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
+  gdefssql_sb_kw(&sb, "DELETE FROM ");
+  gdefssql_sb_table(&sb, table);
+  gdefssql_sb_kw(&sb, " WHERE ");
+  gdefssql_sb_ident(&sb, "subject");
+  gdefssql_sb_kw(&sb, " = ");
+  gdefssql_sb_param(&sb, subject);
+  rc = gdefssql_cx_run(c, &sb);
+  gdefssql_sb_free(&sb);
+  return rc;
+}
+
+/* One erasure inside the caller's write transaction: the subject's key and
+ * material go and its ledger row is written, unless it has one already.
+ * *out_ledgered says a row was written (the tables then want their vacuum). */
+static GDEFSTOR_Result erase_in_txn(Cx * c, const GDEFSSQL_Datum * subject,
+    int64_t when, int * out_ledgered) {
   KRead r;
-  Cx c;
   int found = 0;
   int64_t seq = 0;
-  GDEFSTOR_Result rc = w_open(k, t, tl, &c);
-  if (rc != GDEFSTOR_OK) {
-    return rc;
-  }
+  GDEFSTOR_Result rc;
+  *out_ledgered = 0;
   memset(&r, 0, sizeof r);
   r.kind = GDEFSSQL_DATUM_INT;
-  rc = read_by(&c, "dsk_ledger", "seq", "subject", &subject, &r, &found);
+  rc = read_by(c, "dsk_ledger", "seq", "subject", subject, &r, &found);
   if (rc == GDEFSTOR_OK && found) {
-    return w_close(k, &c, GDEFSTOR_OK); /* once is enough */
+    return GDEFSTOR_OK; /* once is enough */
   }
   if (rc == GDEFSTOR_OK) {
     /* The key first: once this commits the data is unreadable. */
     Sb sb;
-    gdefssql_sb_init(&sb, c.b->alloc, &c.b->d, c.qual);
+    gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
     gdefssql_sb_kw(&sb, "DELETE FROM ");
     gdefssql_sb_table(&sb, "dsk_key");
     gdefssql_sb_kw(&sb, " WHERE ");
     gdefssql_sb_ident(&sb, "subject");
     gdefssql_sb_kw(&sb, " = ");
-    gdefssql_sb_param(&sb, &subject);
-    rc = gdefssql_cx_run(&c, &sb);
+    gdefssql_sb_param(&sb, subject);
+    rc = gdefssql_cx_run(c, &sb);
     gdefssql_sb_free(&sb);
   }
   if (rc == GDEFSTOR_OK) {
-    rc = next_seq(&c, &seq);
+    rc = delete_subject(c, "dsk_sealed", subject);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = next_seq(c, &seq);
   }
   if (rc == GDEFSTOR_OK) {
     KKv kv[3];
     kv[0].col = "subject";
-    kv[0].v = subject;
+    kv[0].v = *subject;
     kv[1].col = "seq";
     kv[1].v = dint(seq);
     kv[2].col = "at";
     kv[2].v = dint(when);
-    rc = insert(&c, "dsk_ledger", kv, 3);
+    rc = insert(c, "dsk_ledger", kv, 3);
   }
+  if (rc == GDEFSTOR_OK) {
+    *out_ledgered = 1;
+  }
+  return rc;
+}
+
+static GDEFSTOR_Result k_erase(void * ctx, const char * t, size_t tl,
+    const char * s, size_t sl, int64_t when) {
+  KBack * k = (KBack *)ctx;
+  GDEFSSQL_Datum subject = dbytes(GDEFSSQL_DATUM_TEXT, s, sl);
+  Cx c;
+  int ledgered = 0;
+  GDEFSTOR_Result rc = w_open(k, t, tl, &c);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  rc = erase_in_txn(&c, &subject, when, &ledgered);
   if (rc != GDEFSTOR_OK) {
     c.failed = 1;
   }
-  return w_close(k, &c, rc);
+  return w_finish(k, &c, rc, ledgered);
 }
 
 static GDEFSTOR_Result k_ledger(void * ctx, const char * t, size_t tl,
@@ -733,6 +837,401 @@ static GDEFSTOR_Result k_ledger(void * ctx, const char * t, size_t tl,
   gdefssql_st_close(&s);
   gdefssql_sb_free(&sb);
   return r_close(k, &c, rc);
+}
+
+/* ---- sealed material, tenant secrets, the key set (story S5b) ------------- */
+
+/* Read one row's bytes (1 to the material bound) by its key, into a copy from
+ * the backend's allocator; *out_found 0 when there is no row. */
+static GDEFSTOR_Result read_material(Cx * c, const char * table,
+    const char * kcol, const GDEFSSQL_Datum * key, int * out_found,
+    uint8_t ** out, size_t * out_len) {
+  KRead r;
+  GDEFSTOR_Result rc;
+  *out_found = 0;
+  memset(&r, 0, sizeof r);
+  r.kind = GDEFSSQL_DATUM_BYTES;
+  r.cap = GDEFSTOR_KEYSTORE_MAX_MATERIAL_BYTES;
+  r.any_len = 1;
+  r.buf = (uint8_t *)gcu_allocator_malloc(c->b->alloc, r.cap);
+  if (r.buf == NULL) {
+    return GDEFSTOR_ERR_OOM;
+  }
+  rc = read_by(c, table, "secret", kcol, key, &r, out_found);
+  if (rc == GDEFSTOR_OK && *out_found && out != NULL) {
+    uint8_t * copy = (uint8_t *)gcu_allocator_malloc(c->b->alloc, r.len);
+    if (copy == NULL) {
+      rc = GDEFSTOR_ERR_OOM;
+    } else {
+      memcpy(copy, r.buf, r.len);
+      *out = copy;
+      *out_len = r.len;
+    }
+  }
+  wipe(r.buf, r.cap);
+  gcu_allocator_free(c->b->alloc, r.buf);
+  return rc;
+}
+
+/* Whether the subject is erased, has a key, or has material: one of the three
+ * or none. */
+static GDEFSTOR_Result subject_known(KBack * k, Cx * c,
+    const GDEFSSQL_Datum * subject, int * out_erased, int * out_known) {
+  uint8_t * secret;
+  KRead key;
+  int has = 0;
+  GDEFSTOR_Result rc;
+  *out_known = 0;
+  secret = (uint8_t *)gcu_allocator_malloc(k->b.alloc, k->cipher.key_bytes);
+  if (secret == NULL) {
+    return GDEFSTOR_ERR_OOM;
+  }
+  memset(&key, 0, sizeof key);
+  key.kind = GDEFSSQL_DATUM_BYTES;
+  key.buf = secret;
+  key.cap = k->cipher.key_bytes;
+  rc = erased_or_key(c, subject, out_erased, &key, &has);
+  wipe(secret, k->cipher.key_bytes);
+  gcu_allocator_free(k->b.alloc, secret);
+  if (rc == GDEFSTOR_OK && !*out_erased && !has) {
+    rc = has_sealed(c, subject, &has);
+  }
+  *out_known = *out_erased || has;
+  return rc;
+}
+
+static GDEFSTOR_Result k_sealed_put(void * ctx, const char * t, size_t tl,
+    const char * s, size_t sl, const uint8_t * bytes, size_t n) {
+  KBack * k = (KBack *)ctx;
+  GDEFSSQL_Datum subject = dbytes(GDEFSSQL_DATUM_TEXT, s, sl);
+  Cx c;
+  int erased = 0;
+  int known = 0;
+  GDEFSTOR_Result rc = w_open(k, t, tl, &c);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  rc = subject_known(k, &c, &subject, &erased, &known);
+  if (rc == GDEFSTOR_OK && known) {
+    rc = w_close(k, &c, GDEFSTOR_OK);
+    return rc == GDEFSTOR_OK ? GDEFSTOR_ERR_INVALID : rc;
+  }
+  if (rc == GDEFSTOR_OK) {
+    KKv kv[2];
+    kv[0].col = "subject";
+    kv[0].v = subject;
+    kv[1].col = "secret";
+    kv[1].v = dbytes(GDEFSSQL_DATUM_BYTES, bytes, n);
+    rc = insert(&c, "dsk_sealed", kv, 2);
+  }
+  if (rc != GDEFSTOR_OK) {
+    c.failed = 1;
+  }
+  return w_close(k, &c, rc);
+}
+
+static GDEFSTOR_Result k_sealed_get(void * ctx, const char * t, size_t tl,
+    const char * s, size_t sl, int * out_erased, uint8_t ** out,
+    size_t * out_len) {
+  KBack * k = (KBack *)ctx;
+  GDEFSSQL_Datum subject = dbytes(GDEFSSQL_DATUM_TEXT, s, sl);
+  KRead r;
+  Cx c;
+  int empty = 0;
+  int found = 0;
+  GDEFSTOR_Result rc;
+  *out_erased = 0;
+  rc = r_open(k, t, tl, &c, &empty);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  if (empty) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  memset(&r, 0, sizeof r);
+  r.kind = GDEFSSQL_DATUM_INT;
+  rc = read_by(&c, "dsk_ledger", "seq", "subject", &subject, &r, &found);
+  if (rc == GDEFSTOR_OK && found) {
+    *out_erased = 1;
+  } else if (rc == GDEFSTOR_OK) {
+    rc = read_material(&c, "dsk_sealed", "subject", &subject, &found, out,
+        out_len);
+    if (rc == GDEFSTOR_OK && !found) {
+      rc = GDEFSTOR_ERR_INVALID;
+    }
+  }
+  if (rc == GDEFSTOR_ERR_INVALID) {
+    /* Not a failed read: the subject has no material. */
+    return r_close(k, &c, GDEFSTOR_OK) == GDEFSTOR_OK ? GDEFSTOR_ERR_INVALID
+                                                       : GDEFSTOR_ERR_IO;
+  }
+  rc = r_close(k, &c, rc);
+  if (rc != GDEFSTOR_OK && !*out_erased && found) {
+    gcu_allocator_free(k->b.alloc, *out);
+    *out = NULL;
+  }
+  return rc;
+}
+
+static GDEFSTOR_Result k_secret_put(void * ctx, const char * t, size_t tl,
+    const char * n, size_t nl, const uint8_t * bytes, size_t len) {
+  KBack * k = (KBack *)ctx;
+  GDEFSSQL_Datum name = dbytes(GDEFSSQL_DATUM_TEXT, n, nl);
+  uint8_t * have = NULL;
+  size_t have_len = 0;
+  Cx c;
+  int found = 0;
+  GDEFSTOR_Result rc = w_open(k, t, tl, &c);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  rc = read_material(&c, "dsk_secret", "name", &name, &found, &have,
+      &have_len);
+  if (rc == GDEFSTOR_OK && found) {
+    int same_bytes = have_len == len && memcmp(have, bytes, len) == 0;
+    wipe(have, have_len);
+    gcu_allocator_free(k->b.alloc, have);
+    rc = w_close(k, &c, GDEFSTOR_OK);
+    return rc != GDEFSTOR_OK ? rc
+                             : (same_bytes ? GDEFSTOR_OK : GDEFSTOR_ERR_INVALID);
+  }
+  if (rc == GDEFSTOR_OK) {
+    KKv kv[2];
+    kv[0].col = "name";
+    kv[0].v = name;
+    kv[1].col = "secret";
+    kv[1].v = dbytes(GDEFSSQL_DATUM_BYTES, bytes, len);
+    rc = insert(&c, "dsk_secret", kv, 2);
+  }
+  if (rc != GDEFSTOR_OK) {
+    c.failed = 1;
+  }
+  return w_close(k, &c, rc);
+}
+
+static GDEFSTOR_Result k_secret_get(void * ctx, const char * t, size_t tl,
+    const char * n, size_t nl, int * out_found, uint8_t ** out,
+    size_t * out_len) {
+  KBack * k = (KBack *)ctx;
+  GDEFSSQL_Datum name = dbytes(GDEFSSQL_DATUM_TEXT, n, nl);
+  Cx c;
+  int empty = 0;
+  GDEFSTOR_Result rc;
+  *out_found = 0;
+  rc = r_open(k, t, tl, &c, &empty);
+  if (rc != GDEFSTOR_OK || empty) {
+    return rc;
+  }
+  rc = read_material(&c, "dsk_secret", "name", &name, out_found, out, out_len);
+  rc = r_close(k, &c, rc);
+  if (rc != GDEFSTOR_OK && *out_found) {
+    gcu_allocator_free(k->b.alloc, *out);
+    *out = NULL;
+    *out_found = 0;
+  }
+  return rc;
+}
+
+/* SELECT "a0"."<kcol>", "a0"."<vcol>" FROM <table> "a0" ORDER BY "a0"."<ocol>",
+ * each row to @p visit as a row of @p kind: bytes for a value column, or the
+ * ledger's time. */
+static GDEFSTOR_Result dump_table(Cx * c, const char * table, const char * kcol,
+    const char * vcol, const char * ocol, int kind,
+    GDEFSTOR_Result (*visit)(void * vctx, const GDEFSTOR_KeyRow * row),
+    void * vctx) {
+  Sb sb;
+  St s;
+  int row = 0;
+  GDEFSTOR_Result rc;
+  gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
+  gdefssql_sb_kw(&sb, "SELECT ");
+  gdefssql_sb_col(&sb, "a0", kcol);
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", vcol);
+  gdefssql_sb_kw(&sb, " FROM ");
+  gdefssql_sb_table(&sb, table);
+  gdefssql_sb_kw(&sb, " ");
+  gdefssql_sb_ident(&sb, "a0");
+  gdefssql_sb_kw(&sb, " ORDER BY ");
+  gdefssql_sb_col(&sb, "a0", ocol);
+  rc = gdefssql_st_open(c, &sb, &s);
+  while (rc == GDEFSTOR_OK) {
+    GDEFSTOR_KeyRow r;
+    const uint8_t * name = NULL;
+    size_t name_len = 0;
+    rc = gdefssql_st_step(&s, &row);
+    if (rc != GDEFSTOR_OK || !row) {
+      break;
+    }
+    memset(&r, 0, sizeof r);
+    r.kind = kind;
+    rc = gdefssql_st_bytes(&s, 0, GDEFSSQL_DATUM_TEXT, &name, &name_len, NULL);
+    if (rc == GDEFSTOR_OK && kind == GDEFSTOR_KEYROW_LEDGER) {
+      rc = gdefssql_st_int(&s, 1, &r.when_ms, NULL);
+    } else if (rc == GDEFSTOR_OK) {
+      rc = gdefssql_st_bytes(&s, 1, GDEFSSQL_DATUM_BYTES, &r.bytes, &r.len,
+          NULL);
+    }
+    if (rc == GDEFSTOR_OK) {
+      r.name = (const char *)name;
+      r.name_len = name_len;
+      rc = visit(vctx, &r);
+    }
+  }
+  gdefssql_st_close(&s);
+  gdefssql_sb_free(&sb);
+  return rc;
+}
+
+static GDEFSTOR_Result k_dump(void * ctx, const char * t, size_t tl,
+    GDEFSTOR_Result (*visit)(void * vctx, const GDEFSTOR_KeyRow * row),
+    void * vctx) {
+  KBack * k = (KBack *)ctx;
+  Cx c;
+  int empty = 0;
+  GDEFSTOR_Result rc;
+  if (visit == NULL) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  rc = r_open(k, t, tl, &c, &empty);
+  if (rc != GDEFSTOR_OK || empty) {
+    return rc;
+  }
+  /* One read transaction: the four parts are one moment of the store. */
+  rc = dump_table(&c, "dsk_secret", "name", "secret", "name",
+      GDEFSTOR_KEYROW_SECRET, visit, vctx);
+  if (rc == GDEFSTOR_OK) {
+    rc = dump_table(&c, "dsk_key", "subject", "secret", "subject",
+        GDEFSTOR_KEYROW_KEY, visit, vctx);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = dump_table(&c, "dsk_sealed", "subject", "secret", "subject",
+        GDEFSTOR_KEYROW_SEALED, visit, vctx);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = dump_table(&c, "dsk_ledger", "subject", "at", "seq",
+        GDEFSTOR_KEYROW_LEDGER, visit, vctx);
+  }
+  return r_close(k, &c, rc);
+}
+
+/* Whether the rows erase the subject. */
+static int rows_erase(const GDEFSTOR_KeyRow * rows, size_t n, const char * s,
+    size_t sl) {
+  size_t i;
+  for (i = 0; i < n; i++) {
+    if (rows[i].kind == GDEFSTOR_KEYROW_LEDGER && same(rows[i].name,
+            rows[i].name_len, s, sl)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* One key or material row of a restore: dropped for an erased subject, kept
+ * when the subject already has exactly it, refused when it has another, and
+ * written otherwise. */
+static GDEFSTOR_Result restore_key(KBack * k, Cx * c, const GDEFSTOR_KeyRow * r) {
+  GDEFSSQL_Datum subject = dbytes(GDEFSSQL_DATUM_TEXT, r->name, r->name_len);
+  int key = r->kind == GDEFSTOR_KEYROW_KEY;
+  int erased = 0;
+  int known = 0;
+  uint8_t * have = NULL;
+  size_t have_len = 0;
+  int found = 0;
+  GDEFSTOR_Result rc;
+  if (key && r->len != k->cipher.key_bytes) {
+    return GDEFSTOR_ERR_INVALID; /* not a key of this store's cipher */
+  }
+  rc = subject_known(k, c, &subject, &erased, &known);
+  if (rc != GDEFSTOR_OK || erased) {
+    return rc;
+  }
+  if (known) {
+    rc = read_material(c, key ? "dsk_key" : "dsk_sealed", "subject", &subject,
+        &found, &have, &have_len);
+    if (rc == GDEFSTOR_OK) {
+      rc = found && have_len == r->len && memcmp(have, r->bytes, r->len) == 0
+               ? GDEFSTOR_OK
+               : GDEFSTOR_ERR_INVALID;
+    }
+    if (have != NULL) {
+      wipe(have, have_len);
+    }
+    gcu_allocator_free(k->b.alloc, have);
+    return rc;
+  }
+  {
+    KKv kv[2];
+    kv[0].col = "subject";
+    kv[0].v = subject;
+    kv[1].col = "secret";
+    kv[1].v = dbytes(GDEFSSQL_DATUM_BYTES, r->bytes, r->len);
+    return insert(c, key ? "dsk_key" : "dsk_sealed", kv, 2);
+  }
+}
+
+static GDEFSTOR_Result restore_secret(KBack * k, Cx * c,
+    const GDEFSTOR_KeyRow * r) {
+  GDEFSSQL_Datum name = dbytes(GDEFSSQL_DATUM_TEXT, r->name, r->name_len);
+  uint8_t * have = NULL;
+  size_t have_len = 0;
+  int found = 0;
+  GDEFSTOR_Result rc = read_material(c, "dsk_secret", "name", &name, &found,
+      &have, &have_len);
+  if (rc == GDEFSTOR_OK && found) {
+    rc = have_len == r->len && memcmp(have, r->bytes, r->len) == 0
+             ? GDEFSTOR_OK
+             : GDEFSTOR_ERR_INVALID;
+    wipe(have, have_len);
+    gcu_allocator_free(k->b.alloc, have);
+    return rc;
+  }
+  if (rc == GDEFSTOR_OK) {
+    KKv kv[2];
+    kv[0].col = "name";
+    kv[0].v = name;
+    kv[1].col = "secret";
+    kv[1].v = dbytes(GDEFSSQL_DATUM_BYTES, r->bytes, r->len);
+    rc = insert(c, "dsk_secret", kv, 2);
+  }
+  return rc;
+}
+
+/* One write transaction: the ledger rows first, so that no key below comes
+ * back for a subject they erase; a conflict rolls every row back. */
+static GDEFSTOR_Result k_restore(void * ctx, const char * t, size_t tl,
+    const GDEFSTOR_KeyRow * rows, size_t n) {
+  KBack * k = (KBack *)ctx;
+  Cx c;
+  int vacuum = 0;
+  size_t i;
+  GDEFSTOR_Result rc = w_open(k, t, tl, &c);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  for (i = 0; rc == GDEFSTOR_OK && i < n; i++) {
+    if (rows[i].kind == GDEFSTOR_KEYROW_LEDGER) {
+      GDEFSSQL_Datum subject = dbytes(GDEFSSQL_DATUM_TEXT, rows[i].name,
+          rows[i].name_len);
+      int ledgered = 0;
+      rc = erase_in_txn(&c, &subject, rows[i].when_ms, &ledgered);
+      vacuum = vacuum || ledgered;
+    }
+  }
+  for (i = 0; rc == GDEFSTOR_OK && i < n; i++) {
+    if (rows[i].kind == GDEFSTOR_KEYROW_SECRET) {
+      rc = restore_secret(k, &c, &rows[i]);
+    } else if ((rows[i].kind == GDEFSTOR_KEYROW_KEY ||
+                   rows[i].kind == GDEFSTOR_KEYROW_SEALED) &&
+               !rows_erase(rows, n, rows[i].name, rows[i].name_len)) {
+      rc = restore_key(k, &c, &rows[i]);
+    }
+  }
+  if (rc != GDEFSTOR_OK) {
+    c.failed = 1;
+  }
+  return w_finish(k, &c, rc, vacuum && rc == GDEFSTOR_OK);
 }
 
 static void k_destroy(void * ctx) {
@@ -795,5 +1294,11 @@ GDEFSSQL_Result gdefssql_keystore_backend(const GDEFSSQL_Dialect * dialect,
   out->unwrap = k_unwrap;
   out->erase = k_erase;
   out->ledger = k_ledger;
+  out->sealed_put = k_sealed_put;
+  out->sealed_get = k_sealed_get;
+  out->secret_put = k_secret_put;
+  out->secret_get = k_secret_get;
+  out->dump = k_dump;
+  out->restore = k_restore;
   return GDEFSSQL_OK;
 }

@@ -383,6 +383,8 @@ GDEFSSQL_Result gdefssql_dialect_check(const GDEFSSQL_Dialect * d) {
       (d->index_drop != NULL && !filled(d->index_drop)) ||
       (d->qualifier_create != NULL && !filled(d->qualifier_create)) ||
       (d->store_exists != NULL && !filled(d->store_exists)) ||
+      (d->key_vacuum != NULL &&
+          (!filled(d->key_vacuum) || !inert(d->key_vacuum))) ||
       (d->index_build != NULL && !inert(d->index_build)) ||
       (d->index_valid != NULL && d->index_drop == NULL)) {
     return GDEFSSQL_ERR_INVALID;

@@ -32,7 +32,7 @@
  * them, so the key store's tables and statements exist once for every engine.
  *
  * Per tenant (one database, or one schema named by the executor's
- * qualifier) there are four tables:
+ * qualifier) there are six tables:
  *
  * | Table | Holds | Key |
  * | --- | --- | --- |
@@ -40,16 +40,19 @@
  * | `dsk_counter` | `id`, `last_seq`: the ledger's sequence | `id` |
  * | `dsk_key` | `subject` REFERENCE, `secret` BYTES: a subject's key | `subject` |
  * | `dsk_ledger` | `subject`, `seq`, `at`: one row per erased subject | `subject` |
+ * | `dsk_sealed` | `subject`, `secret`: material a caller sealed | `subject` |
+ * | `dsk_secret` | `name`, `secret`: a tenant secret, written once | `name` |
  *
  * and the unique index `dsk_ledger_seq` on `dsk_ledger (seq)`. A key is made
  * with the cipher's randomness inside the key store and leaves it only into
  * the cipher, to seal or open bytes under it. Erasing a subject deletes its
- * `dsk_key` row and inserts its `dsk_ledger` row in one transaction; a
- * subject with a ledger row reads as erased and can never get a key again.
- * What the engine keeps of a deleted row (free pages, a write-ahead log) is
- * the engine backend's to clear (SQLite: `secure_delete` and a checkpoint).
+ * `dsk_key` and `dsk_sealed` rows and inserts its `dsk_ledger` row in one
+ * transaction; a subject with a ledger row reads as erased and can never get
+ * a key again. What the engine keeps of a deleted row (free pages, a
+ * write-ahead log) is the engine backend's to clear (SQLite: `secure_delete`
+ * and a checkpoint; Postgres: the dialect's `key_vacuum` after the commit).
  *
- * The first write of a tenant in a backend's life creates the four tables in
+ * The first write of a tenant in a backend's life creates the six tables in
  * a transaction of its own and checks `dsk_schema.version`: a newer one is
  * ::GDEFSTOR_ERR_UNSUPPORTED, another ::GDEFSTOR_ERR_FORMAT. A read of a
  * tenant whose store does not exist reads as no key.

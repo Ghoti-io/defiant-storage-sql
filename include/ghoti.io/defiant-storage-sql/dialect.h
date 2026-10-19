@@ -183,6 +183,19 @@ typedef struct GDEFSSQL_Dialect {
    * missing store otherwise (a schema, where SQLite has a missing file) runs
    * it through gdefssql_store_exists(). */
   const char * store_exists;
+
+  /* ---- the key store (story S5b) -----------------------------------------
+   * May be NULL, as above. */
+
+  /** Written before the qualified name of a key store table to reclaim the
+   * rows an erasure deleted, run outside any transaction after the erasure
+   * commits, for `dsk_key` and `dsk_sealed`, e.g. `VACUUM (FULL) ` (Postgres,
+   * where a deleted row stays in the table's pages as a dead tuple until a
+   * vacuum, and FULL writes the table anew so the old pages go). NULL: the
+   * engine clears deleted rows itself (SQLite's `secure_delete`, which its
+   * executor sets). What a write-ahead log or its archives keep is the
+   * operator's to expire either way (keystore.h). */
+  const char * key_vacuum;
 } GDEFSSQL_Dialect;
 
 /**

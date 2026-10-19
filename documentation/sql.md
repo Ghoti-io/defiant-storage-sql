@@ -29,7 +29,7 @@ No identifier is built from caller text. Every identifier is one of:
 | `vC`, `vCs` | column C of a group, and its subject column |
 | fixed column names | `rid pid creator created rev last_item seq pub del actor at cseq who why ent item vfrom vto parent ord id version last_row last_type last_cseq name tno decl grp col role kind type base body fld subject mac kid norm` |
 | `aK` | a table alias in one statement |
-| `dsk_schema`, `dsk_counter`, `dsk_key`, `dsk_ledger`, `dsk_ledger_seq` | the key store's tables and index (section 8), never in a data store |
+| `dsk_schema`, `dsk_counter`, `dsk_key`, `dsk_ledger`, `dsk_sealed`, `dsk_secret`, `dsk_ledger_seq` | the key store's tables and index (section 8), never in a data store |
 | `subject secret last_seq` | the key store's column names |
 
 N is the type's number, given out by `dss_counter.last_type` the first time a
@@ -329,16 +329,29 @@ database of its own, never a tenant's data store (AD-13, AD-19). Per tenant:
 | `dsk_counter` | `id`, `last_seq` | `id` |
 | `dsk_key` | `subject` REFERENCE, `secret` BYTES | `subject` |
 | `dsk_ledger` | `subject` REFERENCE, `seq`, `at` DATETIME; unique index `dsk_ledger_seq (seq)` | `subject` |
+| `dsk_sealed` | `subject` REFERENCE, `secret` BYTES: material a caller sealed (`gdefstor_keystore_subject_put()`) | `subject` |
+| `dsk_secret` | `name` REFERENCE, `secret` BYTES: a tenant secret, written once | `name` |
 
 | Operation | Statements |
 | --- | --- |
-| first write per tenant | the four tables and the index, `IF NOT EXISTS`, and their rows, in a transaction of their own; another `dsk_schema.version` refused |
-| create | in the write: the ledger row and the key row by `subject` (either makes it `GDEFSTOR_ERR_INVALID`), then `INSERT` of the key the cipher's randomness made |
+| first write per tenant | the six tables and the index, `IF NOT EXISTS`, and their rows, in a transaction of their own; another `dsk_schema.version` refused |
+| create | in the write: the ledger row, the key row and the sealed row by `subject` (any makes it `GDEFSTOR_ERR_INVALID`), then `INSERT` of the key the cipher's randomness made |
+| subject put | in the write: the same three reads, then `INSERT` into `dsk_sealed` |
+| subject sealed | in a read: the ledger row (erased), else the sealed row; a key the store made is never read back |
+| secret put, get | the row by `name`; a put of the same bytes writes nothing, of other bytes is `GDEFSTOR_ERR_INVALID` |
 | wrap, unwrap | in a read: the ledger row (erased), else the key row; the cipher seals or opens outside the database |
-| erase, ledger append | in the write: the ledger row (present: nothing to do), `DELETE` of the key row, the counter, `INSERT` of the ledger row |
+| erase, ledger append | in the write: the ledger row (present: nothing to do), `DELETE` of the key row and of the sealed row, the counter, `INSERT` of the ledger row; after the commit, when a ledger row was written and the dialect has `key_vacuum`, that statement on `dsk_key` and `dsk_sealed`, outside any transaction |
 | ledger | `SELECT subject, at ... ORDER BY seq` |
+| key set (dump) | in one read: `dsk_secret` by name, `dsk_key` and `dsk_sealed` by subject, `dsk_ledger` by `seq` |
+| key set (restore) | in one write: each ledger row as an erasure, then each secret, key and sealed row (dropped for an erased subject, kept when equal, `GDEFSTOR_ERR_INVALID` and a rollback when the tenant holds other bytes), then the vacuum as for an erasure |
 
 A key read for a wrap is copied out, used and wiped; a key never reaches a
 log, a statement's text or a data store. What the engine keeps of a deleted
 key row (free pages, a write-ahead log, dead tuples) is the engine backend's
-to clear.
+to clear: SQLite's executor sets `secure_delete` and truncates the log after
+each commit; Postgres's dialect sets `key_vacuum` to `VACUUM (FULL) `, which
+writes the table anew. Neither reaches a write-ahead log already archived:
+expiring those archives is the operator's.
+
+A key store made before `dsk_sealed` and `dsk_secret` existed gains them at
+its first write in a backend's life; its `dsk_schema.version` stays 1.
