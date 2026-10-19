@@ -95,8 +95,12 @@ TEST_F(Schema, ANestedDeclarationYieldsTheDocumentedTables) {
       "CREATE TABLE IF NOT EXISTS \"t2_c2\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" REAL, PRIMARY KEY (\"ent\", \"item\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_g3\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" INTEGER, \"v1\" TEXT, PRIMARY KEY (\"ent\", \"item\", \"vfrom\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_c3\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" INTEGER, \"v1\" TEXT, PRIMARY KEY (\"ent\", \"item\"))",
+      /* email is personal: the blind table, and its two indexes below. */
+      "CREATE TABLE IF NOT EXISTS \"t2_b\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"fld\" INTEGER NOT NULL, \"subject\" TEXT NOT NULL, \"mac\" BLOB NOT NULL, \"kid\" INTEGER NOT NULL, \"norm\" INTEGER NOT NULL, PRIMARY KEY (\"ent\", \"item\", \"vfrom\", \"fld\"))",
       "CREATE INDEX IF NOT EXISTS \"t2_i0_0\" ON \"t2_c0\" (\"v0\", \"ent\")",
       "CREATE UNIQUE INDEX IF NOT EXISTS \"t2p\" ON \"t2_e\" (\"pid\")",
+      "CREATE INDEX IF NOT EXISTS \"t2_bm\" ON \"t2_b\" (\"fld\", \"mac\")",
+      "CREATE INDEX IF NOT EXISTS \"t2_bs\" ON \"t2_b\" (\"subject\")",
       "CREATE INDEX IF NOT EXISTS \"t2_j0_4\" ON \"t2_g0\" (\"v4s\")",
       "CREATE INDEX IF NOT EXISTS \"t2_i2_0\" ON \"t2_c2\" (\"v0\", \"ent\")",
   };
@@ -533,10 +537,11 @@ TEST_F(Index, NoIndexIsBuiltInsideAStepTransaction) {
       }
     }
     /* dss_type_tno, dss_entity_rid, t1p, number, lines.sku, email's
-     * subject, then total and note. */
-    EXPECT_EQ(8u, builds) << fake;
+     * subject, the blind table's two (email is personal), then total and
+     * note. */
+    EXPECT_EQ(10u, builds) << fake;
     EXPECT_EQ(0, r.engine->index_builds_in_txn);
-    EXPECT_EQ(8u, r.engine->stores[kTenant].committed.indexes.size());
+    EXPECT_EQ(10u, r.engine->stores[kTenant].committed.indexes.size());
     gdefstor_store_destroy(r.store);
   }
 }

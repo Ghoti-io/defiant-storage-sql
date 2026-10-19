@@ -453,6 +453,86 @@ static void compare(Qc * q, int op, const Src * l, const Src * r) {
   }
 }
 
+/* ---- blind-index equality ------------------------------------------------- */
+
+/* owner.rid IN (SELECT b.ent FROM tN_b b JOIN tN_cG c ON c.ent = b.ent AND
+ * c.item = b.item AND c.vfrom = b.vfrom WHERE b.fld = ? AND b.mac = ?): a
+ * blind row of this field with this MAC whose version is an item's current
+ * one. The join on vfrom is what keeps an older version's MAC from matching;
+ * the (fld, mac) index drives it. Two-valued: keys IN keys. */
+static void blind_in(Qc * q, const GDEFSTOR_QueryNode * n, const Scope * here,
+    const Scope * outer) {
+  const GDEFSTOR_QueryOperand * l = &n->left;
+  const GDEFSTOR_QueryOperand * r = &n->right;
+  GDEFSTOR_FieldInfo f;
+  size_t at = 0;
+  char a[GDEFSSQL_NAME_CAP];
+  char c[GDEFSSQL_NAME_CAP];
+  char t[GDEFSSQL_NAME_CAP];
+  GDEFSSQL_Datum mac;
+  uint32_t grp;
+  (void)outer;
+  if (n->child_count != 0 || l->kind != GDEFSTOR_QUERY_FIELD ||
+      l->flags != 0 || r->kind != GDEFSTOR_QUERY_CONST || r->flags != 0 ||
+      r->text_count != 1 || r->texts == NULL || r->texts[0].bytes == NULL ||
+      r->texts[0].len != GDEFSTOR_BLIND_MAC_BYTES || l->field == NULL ||
+      gdefstor_type_find(here->type, l->field, l->field_len, &at) !=
+          GDEFSTOR_OK) {
+    refuse(q, GDEFSTOR_ERR_UNSUPPORTED);
+    return;
+  }
+  memset(&f, 0, sizeof f);
+  f.size = sizeof f;
+  if (gdefstor_type_field(here->type, at, &f) != GDEFSTOR_OK ||
+      f.type == GDEFSTOR_FIELD_GROUP || f.retired ||
+      (f.flags & GDEFSTOR_FIELD_PERSONAL) == 0) {
+    refuse(q, GDEFSTOR_ERR_UNSUPPORTED);
+    return;
+  }
+  grp = (f.flags & GDEFSTOR_FIELD_MULTIPLE) != 0 ? f.group : f.in_group;
+  next_alias(q, a);
+  next_alias(q, c);
+  gdefssql_sb_kw(q->sb, "(");
+  gdefssql_sb_col(q->sb, here->e, "rid");
+  gdefssql_sb_kw(q->sb, " IN (SELECT ");
+  gdefssql_sb_col(q->sb, a, "ent");
+  gdefssql_sb_kw(q->sb, " FROM ");
+  gdefssql_name_table(t, here->tno, GDEFSSQL_ROLE_BLIND, 0);
+  gdefssql_sb_table(q->sb, t);
+  gdefssql_sb_kw(q->sb, " ");
+  gdefssql_sb_ident(q->sb, a);
+  gdefssql_sb_kw(q->sb, " JOIN ");
+  gdefssql_name_table(t, here->tno, GDEFSSQL_ROLE_CURRENT, grp);
+  gdefssql_sb_table(q->sb, t);
+  gdefssql_sb_kw(q->sb, " ");
+  gdefssql_sb_ident(q->sb, c);
+  gdefssql_sb_kw(q->sb, " ON ");
+  gdefssql_sb_col(q->sb, c, "ent");
+  gdefssql_sb_kw(q->sb, " = ");
+  gdefssql_sb_col(q->sb, a, "ent");
+  gdefssql_sb_kw(q->sb, " AND ");
+  gdefssql_sb_col(q->sb, c, "item");
+  gdefssql_sb_kw(q->sb, " = ");
+  gdefssql_sb_col(q->sb, a, "item");
+  gdefssql_sb_kw(q->sb, " AND ");
+  gdefssql_sb_col(q->sb, c, "vfrom");
+  gdefssql_sb_kw(q->sb, " = ");
+  gdefssql_sb_col(q->sb, a, "vfrom");
+  gdefssql_sb_kw(q->sb, " WHERE ");
+  gdefssql_sb_col(q->sb, a, "fld");
+  gdefssql_sb_kw(q->sb, " = ");
+  gdefssql_sb_int(q->sb, f.id);
+  gdefssql_sb_kw(q->sb, " AND ");
+  gdefssql_sb_col(q->sb, a, "mac");
+  gdefssql_sb_kw(q->sb, " = ");
+  memset(&mac, 0, sizeof mac);
+  mac.kind = GDEFSSQL_DATUM_BYTES;
+  mac.bytes = r->texts[0].bytes;
+  mac.len = GDEFSTOR_BLIND_MAC_BYTES;
+  gdefssql_sb_param(q->sb, &mac);
+  gdefssql_sb_kw(q->sb, "))");
+}
+
 /* ---- the predicate -------------------------------------------------------- */
 
 static void node(Qc * q, const GDEFSTOR_QueryNode * n, const Scope * here,
@@ -542,6 +622,9 @@ static void node(Qc * q, const GDEFSTOR_QueryNode * n, const Scope * here,
     return;
   case GDEFSTOR_QUERY_EXISTS:
     exists(q, n, here, outer, depth);
+    return;
+  case GDEFSTOR_QUERY_BLIND:
+    blind_in(q, n, here, outer);
     return;
   case GDEFSTOR_QUERY_EQ:
   case GDEFSTOR_QUERY_NE:

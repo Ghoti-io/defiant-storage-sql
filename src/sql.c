@@ -71,6 +71,9 @@ void gdefssql_name_table(char out[GDEFSSQL_NAME_CAP], uint32_t tno, int role,
     snprintf(out, GDEFSSQL_NAME_CAP, "t%lu_c%lu", (unsigned long)tno,
         (unsigned long)group);
     return;
+  case GDEFSSQL_ROLE_BLIND:
+    snprintf(out, GDEFSSQL_NAME_CAP, "t%lu_b", (unsigned long)tno);
+    return;
   default:
     /* Not a table: an empty name, which the builder refuses. */
     out[0] = '\0';
@@ -86,6 +89,12 @@ void gdefssql_name_column(char out[GDEFSSQL_NAME_CAP], uint32_t col,
 
 void gdefssql_name_index(char out[GDEFSSQL_NAME_CAP], uint32_t tno, int role,
     uint32_t group, uint32_t col) {
+  if (role == GDEFSSQL_ROLE_BLIND_INDEX || role == GDEFSSQL_ROLE_BLIND_SUBJECT) {
+    snprintf(out, GDEFSSQL_NAME_CAP,
+        role == GDEFSSQL_ROLE_BLIND_INDEX ? "t%lu_bm" : "t%lu_bs",
+        (unsigned long)tno);
+    return;
+  }
   snprintf(out, GDEFSSQL_NAME_CAP,
       role == GDEFSSQL_ROLE_SUBJECT_INDEX ? "t%lu_j%lu_%lu" : "t%lu_i%lu_%lu",
       (unsigned long)tno, (unsigned long)group, (unsigned long)col);

@@ -59,7 +59,13 @@
  * Group 0 is the root group. Column `vC` holds the group's column C (the
  * port's stable column number); a personal field adds `vCs`, its subject. An
  * indexed field has the index `tN_iG_C` on `tN_cG (vC, entity)`; a personal
- * field's subject column has `tN_jG_C` on `tN_gG`. Nothing is ever dropped or
+ * field's subject column has `tN_jG_C` on `tN_gG`, which serves the subject
+ * lookup. A type with a personal field also has the blind table `tN_b`
+ * (AD-14): one row per value version written with a MAC (entity, item,
+ * valid_from, field, subject, MAC, key id, normalization version), indexed by
+ * `tN_bm (fld, mac)` for blind equality and the history lookup and by
+ * `tN_bs (subject)` for erasure. It is truth while its subject exists:
+ * `rebuild` leaves it alone, and the MAC is in no other table. Nothing is ever dropped or
  * retyped: a schema step creates a table, adds a nullable column or creates
  * an index, and each is recorded in `dss_name`, so a step already taken is
  * never taken again (documentation/sql.md has every column and index).

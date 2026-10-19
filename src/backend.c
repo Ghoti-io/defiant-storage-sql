@@ -821,6 +821,249 @@ static GDEFSTOR_Result visit_states(Cx * c, uint32_t tno, uint64_t rid,
   return rc;
 }
 
+/* ---- the blind table ----------------------------------------------------- */
+
+/* Whether type @p cat's catalog records its blind table. */
+static int cat_blind(const GDEFSSQL_Cat * cat) {
+  size_t i;
+  for (i = 0; i < cat->nrows; i++) {
+    if (cat->rows[i].role == GDEFSSQL_ROLE_BLIND) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* Whether type @p tno has a blind table. */
+static GDEFSTOR_Result has_blind(Cx * c, uint32_t tno, int * out) {
+  GDEFSSQL_Cat cat;
+  GDEFSTOR_Result rc = gdefssql_cat_load(c, tno, &cat);
+  *out = rc == GDEFSTOR_OK && cat_blind(&cat);
+  gdefssql_cat_free(&cat);
+  return rc;
+}
+
+/* Visit (`blind`) the blind rows of type @p tno: of entity @p rid, or (0) all.
+ * The caller has seen that the table exists. */
+static GDEFSTOR_Result visit_blinds(Cx * c, uint32_t tno, uint64_t rid,
+    const GDEFSTOR_ModelVisitor * visitor) {
+  static const char * const cols[] = {"ent", "item", "vfrom", "fld",
+      "subject", "mac", "kid", "norm"};
+  char t[GDEFSSQL_NAME_CAP];
+  Sb sb;
+  St s;
+  size_t i;
+  int row = 0;
+  GDEFSTOR_Result rc;
+  if (visitor->blind == NULL) {
+    return GDEFSTOR_OK;
+  }
+  sb_open(&sb, c);
+  gdefssql_sb_kw(&sb, "SELECT ");
+  for (i = 0; i < 8; i++) {
+    gdefssql_sb_kw(&sb, i == 0 ? "" : ", ");
+    gdefssql_sb_col(&sb, "a0", cols[i]);
+  }
+  gdefssql_name_table(t, tno, GDEFSSQL_ROLE_BLIND, 0);
+  from(&sb, t);
+  if (rid != 0) {
+    GDEFSSQL_Datum v = dint((int64_t)rid);
+    where_eq(&sb, " WHERE ", "ent", &v);
+  }
+  gdefssql_sb_kw(&sb, " ORDER BY ");
+  for (i = 0; i < 4; i++) {
+    gdefssql_sb_kw(&sb, i == 0 ? "" : ", ");
+    gdefssql_sb_col(&sb, "a0", cols[i]);
+  }
+  rc = gdefssql_st_open(c, &sb, &s);
+  while (rc == GDEFSTOR_OK) {
+    GDEFSTOR_ModelBlind b;
+    int64_t v[4];
+    int64_t kid = 0;
+    int64_t norm = 0;
+    const uint8_t * p = NULL;
+    size_t n = 0;
+    rc = gdefssql_st_step(&s, &row);
+    if (rc != GDEFSTOR_OK || !row) {
+      break;
+    }
+    memset(&b, 0, sizeof b);
+    for (i = 0; rc == GDEFSTOR_OK && i < 4; i++) {
+      rc = gdefssql_st_int(&s, (unsigned)i, &v[i], NULL);
+    }
+    if (rc == GDEFSTOR_OK) {
+      rc = gdefssql_st_bytes(&s, 4, GDEFSSQL_DATUM_TEXT, &p, &n, NULL);
+      b.subject = p;
+      b.subject_len = n;
+    }
+    if (rc == GDEFSTOR_OK) {
+      rc = gdefssql_st_bytes(&s, 5, GDEFSSQL_DATUM_BYTES, &p, &n, NULL);
+      b.mac = p;
+      if (rc == GDEFSTOR_OK && (p == NULL || n != GDEFSTOR_BLIND_MAC_BYTES)) {
+        rc = GDEFSTOR_ERR_CORRUPT;
+      }
+    }
+    if (rc == GDEFSTOR_OK) {
+      rc = gdefssql_st_int(&s, 6, &kid, NULL);
+    }
+    if (rc == GDEFSTOR_OK) {
+      rc = gdefssql_st_int(&s, 7, &norm, NULL);
+    }
+    if (rc == GDEFSTOR_OK &&
+        (v[0] <= 0 || v[1] <= 0 || v[2] <= 0 || v[3] < 0 ||
+            v[3] > (int64_t)UINT32_MAX || kid < 0 || kid > (int64_t)UINT32_MAX ||
+            norm < 0 || norm > (int64_t)UINT32_MAX)) {
+      rc = GDEFSTOR_ERR_CORRUPT;
+    }
+    if (rc != GDEFSTOR_OK) {
+      break;
+    }
+    b.item = (uint64_t)v[1];
+    b.valid_from = (uint64_t)v[2];
+    b.field = (uint32_t)v[3];
+    b.key_id = (uint32_t)kid;
+    b.version = (uint32_t)norm;
+    rc = visitor->blind(visitor->ctx, (uint64_t)v[0], &b);
+  }
+  gdefssql_st_close(&s);
+  gdefssql_sb_free(&sb);
+  return rc;
+}
+
+/* Insert the blind rows of one apply, each for a version it inserted. */
+static GDEFSTOR_Result insert_blinds(Cx * c, uint32_t tno,
+    const GDEFSSQL_Cat * cat, const GDEFSTOR_ModelApply * a, uint64_t rev) {
+  char t[GDEFSSQL_NAME_CAP];
+  size_t i;
+  GDEFSTOR_Result rc = GDEFSTOR_OK;
+  if (a->blind_count == 0) {
+    return GDEFSTOR_OK;
+  }
+  if (a->blinds == NULL) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  if (!cat_blind(cat)) {
+    /* A type declared before the blind table existed: it gets one when its
+     * declaration next changes. */
+    return GDEFSTOR_ERR_UNSUPPORTED;
+  }
+  gdefssql_name_table(t, tno, GDEFSSQL_ROLE_BLIND, 0);
+  for (i = 0; rc == GDEFSTOR_OK && i < a->blind_count; i++) {
+    const GDEFSTOR_ModelBlind * b = &a->blinds[i];
+    Kv kv[8];
+    size_t k;
+    int indexed = 0;
+    for (k = 0; k < a->insert_count; k++) {
+      indexed |= a->inserts[k].item == b->item;
+    }
+    /* A blind row without the version it indexes is the port's invariant
+     * broken: nothing is written. */
+    if (!indexed || b->valid_from != rev || b->mac == NULL ||
+        !fits(b->item) || (b->subject == NULL && b->subject_len != 0)) {
+      return GDEFSTOR_ERR_INTERNAL;
+    }
+    kv[0].col = "ent";
+    kv[0].v = dint((int64_t)a->row);
+    kv[1].col = "item";
+    kv[1].v = dint((int64_t)b->item);
+    kv[2].col = "vfrom";
+    kv[2].v = dint((int64_t)rev);
+    kv[3].col = "fld";
+    kv[3].v = dint(b->field);
+    kv[4].col = "subject";
+    kv[4].v = dbytes(GDEFSSQL_DATUM_TEXT, b->subject, b->subject_len);
+    kv[5].col = "mac";
+    kv[5].v = dbytes(GDEFSSQL_DATUM_BYTES, b->mac, GDEFSTOR_BLIND_MAC_BYTES);
+    kv[6].col = "kid";
+    kv[6].v = dint(b->key_id);
+    kv[7].col = "norm";
+    kv[7].v = dint(b->version);
+    rc = insert(c, t, kv, 8);
+  }
+  return rc;
+}
+
+/* The type numbers whose catalog records @p role at group 0, column 0 (the
+ * blind table), or the (tno, grp, col) of every @p role row (the subject
+ * columns), ascending. */
+typedef struct CatHit {
+  uint32_t tno;
+  uint32_t grp;
+  uint32_t col;
+} CatHit;
+
+static GDEFSTOR_Result cat_rows(Cx * c, int role, CatHit ** out,
+    size_t * out_n) {
+  Sb sb;
+  St s;
+  GDEFSSQL_Datum r = dint(role);
+  CatHit * v = NULL;
+  size_t n = 0;
+  size_t cap = 0;
+  int row = 0;
+  GDEFSTOR_Result rc;
+  *out = NULL;
+  *out_n = 0;
+  sb_open(&sb, c);
+  gdefssql_sb_kw(&sb, "SELECT ");
+  gdefssql_sb_col(&sb, "a0", "tno");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "grp");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "col");
+  from(&sb, "dss_name");
+  where_eq(&sb, " WHERE ", "role", &r);
+  gdefssql_sb_kw(&sb, " ORDER BY ");
+  gdefssql_sb_col(&sb, "a0", "tno");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "grp");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "col");
+  rc = gdefssql_st_open(c, &sb, &s);
+  while (rc == GDEFSTOR_OK) {
+    int64_t k[3];
+    unsigned i;
+    rc = gdefssql_st_step(&s, &row);
+    if (rc != GDEFSTOR_OK || !row) {
+      break;
+    }
+    for (i = 0; rc == GDEFSTOR_OK && i < 3; i++) {
+      rc = gdefssql_st_int(&s, i, &k[i], NULL);
+    }
+    if (rc == GDEFSTOR_OK && (k[0] <= 0 || k[0] > (int64_t)UINT32_MAX ||
+                                 k[1] < 0 || k[1] > (int64_t)UINT32_MAX ||
+                                 k[2] < 0 || k[2] > (int64_t)UINT32_MAX)) {
+      rc = GDEFSTOR_ERR_CORRUPT;
+    }
+    if (rc == GDEFSTOR_OK && n == cap) {
+      size_t grown = cap == 0 ? 8 : cap * 2;
+      CatHit * next = (CatHit *)gcu_allocator_realloc(c->b->alloc, v,
+          grown * sizeof *next);
+      if (next == NULL) {
+        rc = GDEFSTOR_ERR_OOM;
+      } else {
+        v = next;
+        cap = grown;
+      }
+    }
+    if (rc == GDEFSTOR_OK) {
+      v[n].tno = (uint32_t)k[0];
+      v[n].grp = (uint32_t)k[1];
+      v[n].col = (uint32_t)k[2];
+      n += 1;
+    }
+  }
+  gdefssql_st_close(&s);
+  gdefssql_sb_free(&sb);
+  if (rc != GDEFSTOR_OK) {
+    gcu_allocator_free(c->b->alloc, v);
+    return rc;
+  }
+  *out = v;
+  *out_n = n;
+  return GDEFSTOR_OK;
+}
+
 /* ---- the members ---------------------------------------------------------- */
 
 static Ready * ready_find(Back * b, const char * t, size_t n) {
@@ -1499,6 +1742,10 @@ static GDEFSTOR_Result m_apply(void * ctx, void * txn,
     rc = insert_version(&x->cx, tno, &cat, &a->inserts[i], a->row,
         r->revision);
   }
+  if (rc == GDEFSTOR_OK) {
+    /* The MACs go to the blind table only, in this same transaction. */
+    rc = insert_blinds(&x->cx, tno, &cat, a, r->revision);
+  }
   gdefssql_cat_free(&cat);
   if (rc == GDEFSTOR_OK) {
     Kv kv[6];
@@ -1581,6 +1828,15 @@ static GDEFSTOR_Result m_items(void * ctx, void * txn, const char * tenant,
   rc = entity_tno(r.c, row, &tno);
   if (rc == GDEFSTOR_OK) {
     rc = visit_all_items(r.c, tno, as_of != 0, row, as_of, visitor);
+  }
+  if (rc == GDEFSTOR_OK && visitor->blind != NULL) {
+    /* Every blind row of the entity: the port picks those of the versions
+     * it read. */
+    int blind = 0;
+    rc = has_blind(r.c, tno, &blind);
+    if (rc == GDEFSTOR_OK && blind) {
+      rc = visit_blinds(r.c, tno, row, visitor);
+    }
   }
   if (rc == GDEFSTOR_ERR_INVALID) {
     GDEFSTOR_Result end = rd_close(&r, GDEFSTOR_OK);
@@ -2264,6 +2520,13 @@ static GDEFSTOR_Result m_dump(void * ctx, const char * tenant,
     if (rc == GDEFSTOR_OK) {
       rc = visit_all_items(r.c, tnos[i], truth, 0, 0, visitor);
     }
+    if (rc == GDEFSTOR_OK && truth && visitor->blind != NULL) {
+      int blind = 0;
+      rc = has_blind(r.c, tnos[i], &blind);
+      if (rc == GDEFSTOR_OK && blind) {
+        rc = visit_blinds(r.c, tnos[i], 0, visitor);
+      }
+    }
   }
   gcu_allocator_free(b->alloc, tnos);
   return rd_close(&r, rc);
@@ -2312,6 +2575,305 @@ static GDEFSTOR_Result m_index_state(void * ctx, const char * tenant,
   if (rc == GDEFSTOR_OK) {
     *out_state = state;
   }
+  return rc;
+}
+
+/* The history lookup: the blind table by its (fld, mac) index, each row with
+ * its entity's public id and its version's vto. */
+static GDEFSTOR_Result m_blind_history(void * ctx, const char * tenant,
+    size_t tenant_len, const GDEFSTOR_Type * type, size_t field,
+    const uint8_t * mac, GDEFSTOR_ModelBlindFn fn, void * fn_ctx) {
+  Back * b = (Back *)ctx;
+  GDEFSTOR_FieldInfo f;
+  GDEFSSQL_Cat cat;
+  uint32_t tno = 0;
+  uint32_t grp;
+  int found = 0;
+  Rd r;
+  GDEFSTOR_Result rc;
+  memset(&f, 0, sizeof f);
+  f.size = sizeof f;
+  if (b == NULL || type == NULL || mac == NULL || fn == NULL ||
+      gdefstor_type_field(type, field, &f) != GDEFSTOR_OK ||
+      f.type == GDEFSTOR_FIELD_GROUP) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  grp = (f.flags & GDEFSTOR_FIELD_MULTIPLE) != 0 ? f.group : f.in_group;
+  rc = rd_open(b, NULL, tenant, tenant_len, &r);
+  if (rc != GDEFSTOR_OK || r.empty) {
+    return rc;
+  }
+  rc = tno_of(r.c, type, &tno);
+  if (rc == GDEFSTOR_OK) {
+    rc = gdefssql_cat_load(r.c, tno, &cat);
+    found = rc == GDEFSTOR_OK && cat_blind(&cat) &&
+            gdefssql_cat_group(&cat, grp) != NULL;
+    gdefssql_cat_free(&cat);
+  }
+  if (rc == GDEFSTOR_OK && found) {
+    char t[GDEFSSQL_NAME_CAP];
+    Sb sb;
+    St s;
+    GDEFSSQL_Datum fld = dint(f.id);
+    GDEFSSQL_Datum m = dbytes(GDEFSSQL_DATUM_BYTES, mac,
+        GDEFSTOR_BLIND_MAC_BYTES);
+    int row = 0;
+    sb_open(&sb, r.c);
+    gdefssql_sb_kw(&sb, "SELECT ");
+    gdefssql_sb_col(&sb, "a0", "ent");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a1", "pid");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a0", "item");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a0", "vfrom");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a2", "vto");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a0", "subject");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a0", "kid");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a0", "norm");
+    gdefssql_name_table(t, tno, GDEFSSQL_ROLE_BLIND, 0);
+    from(&sb, t);
+    gdefssql_sb_kw(&sb, " JOIN ");
+    gdefssql_name_table(t, tno, GDEFSSQL_ROLE_ENTITY, 0);
+    gdefssql_sb_table(&sb, t);
+    gdefssql_sb_kw(&sb, " ");
+    gdefssql_sb_ident(&sb, "a1");
+    gdefssql_sb_kw(&sb, " ON ");
+    gdefssql_sb_col(&sb, "a1", "rid");
+    gdefssql_sb_kw(&sb, " = ");
+    gdefssql_sb_col(&sb, "a0", "ent");
+    gdefssql_sb_kw(&sb, " JOIN ");
+    gdefssql_name_table(t, tno, GDEFSSQL_ROLE_GROUP, grp);
+    gdefssql_sb_table(&sb, t);
+    gdefssql_sb_kw(&sb, " ");
+    gdefssql_sb_ident(&sb, "a2");
+    gdefssql_sb_kw(&sb, " ON ");
+    gdefssql_sb_col(&sb, "a2", "ent");
+    gdefssql_sb_kw(&sb, " = ");
+    gdefssql_sb_col(&sb, "a0", "ent");
+    gdefssql_sb_kw(&sb, " AND ");
+    gdefssql_sb_col(&sb, "a2", "item");
+    gdefssql_sb_kw(&sb, " = ");
+    gdefssql_sb_col(&sb, "a0", "item");
+    gdefssql_sb_kw(&sb, " AND ");
+    gdefssql_sb_col(&sb, "a2", "vfrom");
+    gdefssql_sb_kw(&sb, " = ");
+    gdefssql_sb_col(&sb, "a0", "vfrom");
+    where_eq(&sb, " WHERE ", "fld", &fld);
+    where_eq(&sb, " AND ", "mac", &m);
+    rc = gdefssql_st_open(r.c, &sb, &s);
+    while (rc == GDEFSTOR_OK) {
+      GDEFSTOR_ModelBlindHit h;
+      int64_t v[3];
+      int64_t vto = 0;
+      int64_t kid = 0;
+      int64_t norm = 0;
+      int nul = 0;
+      const uint8_t * p = NULL;
+      size_t n = 0;
+      unsigned i;
+      rc = gdefssql_st_step(&s, &row);
+      if (rc != GDEFSTOR_OK || !row) {
+        break;
+      }
+      memset(&h, 0, sizeof h);
+      rc = gdefssql_st_int(&s, 0, &v[0], NULL);
+      if (rc == GDEFSTOR_OK) {
+        rc = gdefssql_st_bytes(&s, 1, GDEFSSQL_DATUM_TEXT, &p, &n, NULL);
+        h.public_id = p == NULL ? "" : (const char *)p;
+        h.public_id_len = n;
+      }
+      for (i = 2; rc == GDEFSTOR_OK && i < 4; i++) {
+        rc = gdefssql_st_int(&s, i, &v[i - 1], NULL);
+      }
+      if (rc == GDEFSTOR_OK) {
+        rc = gdefssql_st_int(&s, 4, &vto, &nul);
+      }
+      if (rc == GDEFSTOR_OK) {
+        rc = gdefssql_st_bytes(&s, 5, GDEFSSQL_DATUM_TEXT, &p, &n, NULL);
+        h.subject = p;
+        h.subject_len = n;
+      }
+      if (rc == GDEFSTOR_OK) {
+        rc = gdefssql_st_int(&s, 6, &kid, NULL);
+      }
+      if (rc == GDEFSTOR_OK) {
+        rc = gdefssql_st_int(&s, 7, &norm, NULL);
+      }
+      if (rc == GDEFSTOR_OK &&
+          (v[0] <= 0 || v[1] <= 0 || v[2] <= 0 || (!nul && vto <= 0) ||
+              kid < 0 || kid > (int64_t)UINT32_MAX || norm < 0 ||
+              norm > (int64_t)UINT32_MAX)) {
+        rc = GDEFSTOR_ERR_CORRUPT;
+      }
+      if (rc != GDEFSTOR_OK) {
+        break;
+      }
+      h.row = (uint64_t)v[0];
+      h.item = (uint64_t)v[1];
+      h.valid_from = (uint64_t)v[2];
+      h.valid_to = nul ? 0 : (uint64_t)vto;
+      h.key_id = (uint32_t)kid;
+      h.version = (uint32_t)norm;
+      rc = fn(fn_ctx, &h);
+    }
+    gdefssql_st_close(&s);
+    gdefssql_sb_free(&sb);
+  }
+  if (rc == GDEFSTOR_ERR_INVALID) {
+    GDEFSTOR_Result end = rd_close(&r, GDEFSTOR_OK);
+    return end == GDEFSTOR_OK ? GDEFSTOR_ERR_INVALID : end;
+  }
+  return rd_close(&r, rc);
+}
+
+/* The subject lookup: every subject column the catalog records (role
+ * SUBJECT), each read through its index tN_jG_C on the truth table. The
+ * blind table is not read. */
+static GDEFSTOR_Result m_subject_lookup(void * ctx, const char * tenant,
+    size_t tenant_len, const uint8_t * subject, size_t subject_len,
+    GDEFSTOR_ModelSubjectFn fn, void * fn_ctx) {
+  Back * b = (Back *)ctx;
+  CatHit * cols = NULL;
+  size_t ncols = 0;
+  size_t i;
+  char * type = NULL;
+  size_t type_len = 0;
+  uint32_t type_tno = 0;
+  Rd r;
+  GDEFSTOR_Result rc;
+  if (b == NULL || fn == NULL || (subject == NULL && subject_len != 0)) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  rc = rd_open(b, NULL, tenant, tenant_len, &r);
+  if (rc != GDEFSTOR_OK || r.empty) {
+    return rc;
+  }
+  rc = cat_rows(r.c, GDEFSSQL_ROLE_SUBJECT, &cols, &ncols);
+  for (i = 0; rc == GDEFSTOR_OK && i < ncols; i++) {
+    char t[GDEFSSQL_NAME_CAP];
+    char col[GDEFSSQL_NAME_CAP];
+    Sb sb;
+    St s;
+    GDEFSSQL_Datum v = dbytes(GDEFSSQL_DATUM_TEXT, subject, subject_len);
+    int row = 0;
+    if (type == NULL || type_tno != cols[i].tno) {
+      gcu_allocator_free(b->alloc, type);
+      type = NULL;
+      rc = type_name(r.c, cols[i].tno, &type, &type_len);
+      type_tno = cols[i].tno;
+      if (rc != GDEFSTOR_OK) {
+        break;
+      }
+    }
+    sb_open(&sb, r.c);
+    gdefssql_sb_kw(&sb, "SELECT ");
+    gdefssql_sb_col(&sb, "a0", "ent");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a1", "pid");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a0", "item");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a0", "vfrom");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a0", "vto");
+    gdefssql_name_table(t, cols[i].tno, GDEFSSQL_ROLE_GROUP, cols[i].grp);
+    from(&sb, t);
+    gdefssql_sb_kw(&sb, " JOIN ");
+    gdefssql_name_table(t, cols[i].tno, GDEFSSQL_ROLE_ENTITY, 0);
+    gdefssql_sb_table(&sb, t);
+    gdefssql_sb_kw(&sb, " ");
+    gdefssql_sb_ident(&sb, "a1");
+    gdefssql_sb_kw(&sb, " ON ");
+    gdefssql_sb_col(&sb, "a1", "rid");
+    gdefssql_sb_kw(&sb, " = ");
+    gdefssql_sb_col(&sb, "a0", "ent");
+    gdefssql_name_column(col, cols[i].col, 1);
+    where_eq(&sb, " WHERE ", col, &v);
+    rc = gdefssql_st_open(r.c, &sb, &s);
+    while (rc == GDEFSTOR_OK) {
+      GDEFSTOR_ModelSubjectHit h;
+      int64_t k[3];
+      int64_t vto = 0;
+      int nul = 0;
+      const uint8_t * p = NULL;
+      size_t n = 0;
+      rc = gdefssql_st_step(&s, &row);
+      if (rc != GDEFSTOR_OK || !row) {
+        break;
+      }
+      memset(&h, 0, sizeof h);
+      rc = gdefssql_st_int(&s, 0, &k[0], NULL);
+      if (rc == GDEFSTOR_OK) {
+        rc = gdefssql_st_bytes(&s, 1, GDEFSSQL_DATUM_TEXT, &p, &n, NULL);
+        h.public_id = p == NULL ? "" : (const char *)p;
+        h.public_id_len = n;
+      }
+      if (rc == GDEFSTOR_OK) {
+        rc = gdefssql_st_int(&s, 2, &k[1], NULL);
+      }
+      if (rc == GDEFSTOR_OK) {
+        rc = gdefssql_st_int(&s, 3, &k[2], NULL);
+      }
+      if (rc == GDEFSTOR_OK) {
+        rc = gdefssql_st_int(&s, 4, &vto, &nul);
+      }
+      if (rc == GDEFSTOR_OK &&
+          (k[0] <= 0 || k[1] <= 0 || k[2] <= 0 || (!nul && vto <= 0))) {
+        rc = GDEFSTOR_ERR_CORRUPT;
+      }
+      if (rc != GDEFSTOR_OK) {
+        break;
+      }
+      h.type = type;
+      h.type_len = type_len;
+      h.row = (uint64_t)k[0];
+      h.group = cols[i].grp;
+      h.column = cols[i].col;
+      h.item = (uint64_t)k[1];
+      h.valid_from = (uint64_t)k[2];
+      h.valid_to = nul ? 0 : (uint64_t)vto;
+      rc = fn(fn_ctx, &h);
+    }
+    gdefssql_st_close(&s);
+    gdefssql_sb_free(&sb);
+  }
+  gcu_allocator_free(b->alloc, type);
+  gcu_allocator_free(b->alloc, cols);
+  return rd_close(&r, rc);
+}
+
+/* Erasure's data-store step: every type's blind rows of the subject, by the
+ * blind table's subject index. */
+static GDEFSTOR_Result m_blind_delete(void * ctx, void * txn,
+    const uint8_t * subject, size_t subject_len) {
+  Txn * x = (Txn *)txn;
+  CatHit * tables = NULL;
+  size_t n = 0;
+  size_t i;
+  GDEFSTOR_Result rc;
+  (void)ctx;
+  if (x == NULL || (subject == NULL && subject_len != 0)) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  rc = cat_rows(&x->cx, GDEFSSQL_ROLE_BLIND, &tables, &n);
+  for (i = 0; rc == GDEFSTOR_OK && i < n; i++) {
+    char t[GDEFSSQL_NAME_CAP];
+    GDEFSSQL_Datum v = dbytes(GDEFSSQL_DATUM_TEXT, subject, subject_len);
+    Sb sb;
+    gdefssql_name_table(t, tables[i].tno, GDEFSSQL_ROLE_BLIND, 0);
+    sb_open(&sb, &x->cx);
+    gdefssql_sb_kw(&sb, "DELETE FROM ");
+    gdefssql_sb_table(&sb, t);
+    bare_eq(&sb, " WHERE ", "subject", &v);
+    rc = gdefssql_cx_run(&x->cx, &sb);
+    gdefssql_sb_free(&sb);
+  }
+  gcu_allocator_free(x->b->alloc, tables);
   return rc;
 }
 
@@ -2389,5 +2951,9 @@ GDEFSSQL_Result gdefssql_model_backend(const GDEFSSQL_Dialect * dialect,
   out->dump = m_dump;
   out->index_ctx = b;
   out->index_state = m_index_state;
+  out->blind_ctx = b;
+  out->blind_history = m_blind_history;
+  out->subject_lookup = m_subject_lookup;
+  out->blind_delete = m_blind_delete;
   return GDEFSSQL_OK;
 }

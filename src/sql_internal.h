@@ -87,7 +87,11 @@ enum {
   GDEFSSQL_ROLE_ENTITY_INDEX = 11,  /* tNp, unique on tN_e (pid) */
   /* tno 0: the tenant tables' own, col 0 dss_type_tno (unique, dss_type
    * (tno)), col 1 dss_entity_rid (unique, dss_entity (rid)) */
-  GDEFSSQL_ROLE_TENANT_INDEX = 12
+  GDEFSSQL_ROLE_TENANT_INDEX = 12,
+  /* The blind index (AD-14), per type with a personal field: */
+  GDEFSSQL_ROLE_BLIND = 13,         /* tN_b: one row per value version's MAC */
+  GDEFSSQL_ROLE_BLIND_INDEX = 14,   /* tN_bm on tN_b (fld, mac) */
+  GDEFSSQL_ROLE_BLIND_SUBJECT = 15  /* tN_bs on tN_b (subject) */
 };
 
 /* dss_name.kind of a VALUE column: the field's logical type, plus this bit
@@ -103,7 +107,8 @@ enum {
  * shape that may reach SQL text as an identifier. */
 int gdefssql_name_ok(const char * name, size_t cap);
 
-/* The table of @p role (ENTITY .. CURRENT) of type @p tno, group @p group. */
+/* The table of @p role (ENTITY .. CURRENT, BLIND) of type @p tno, group
+ * @p group. */
 void gdefssql_name_table(char out[GDEFSSQL_NAME_CAP], uint32_t tno, int role,
     uint32_t group);
 
@@ -111,7 +116,8 @@ void gdefssql_name_table(char out[GDEFSSQL_NAME_CAP], uint32_t tno, int role,
 void gdefssql_name_column(char out[GDEFSSQL_NAME_CAP], uint32_t col,
     int subject);
 
-/* An index of @p role (INDEX, SUBJECT_INDEX) on column @p col of a group. */
+/* An index of @p role (INDEX, SUBJECT_INDEX) on column @p col of a group;
+ * for BLIND_INDEX and BLIND_SUBJECT, the blind table's (group and column 0). */
 void gdefssql_name_index(char out[GDEFSSQL_NAME_CAP], uint32_t tno, int role,
     uint32_t group, uint32_t col);
 

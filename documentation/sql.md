@@ -24,8 +24,10 @@ No identifier is built from caller text. Every identifier is one of:
 | `tNp` | unique index on `tN_e (pid)` |
 | `tN_iG_C` | index on `tN_cG (vC, ent)` for an indexed field |
 | `tN_jG_C` | index on `tN_gG (vCs)`, the subject of a personal field |
+| `tN_b` | type N's blind table (AD-14), for a type with a personal field |
+| `tN_bm`, `tN_bs` | indexes on `tN_b (fld, mac)` and `tN_b (subject)` |
 | `vC`, `vCs` | column C of a group, and its subject column |
-| fixed column names | `rid pid creator created rev last_item seq pub del actor at cseq who why ent item vfrom vto parent ord id version last_row last_type last_cseq name tno decl grp col role kind type base body` |
+| fixed column names | `rid pid creator created rev last_item seq pub del actor at cseq who why ent item vfrom vto parent ord id version last_row last_type last_cseq name tno decl grp col role kind type base body fld subject mac kid norm` |
 | `aK` | a table alias in one statement |
 | `dsk_schema`, `dsk_counter`, `dsk_key`, `dsk_ledger`, `dsk_ledger_seq` | the key store's tables and index (section 8), never in a data store |
 | `subject secret last_seq` | the key store's column names |
@@ -43,7 +45,8 @@ column and index to what it holds: `role` is 1 entity, 2 state, 3 revision,
 4 newest state, 5 item versions, 6 current items, 7 value column, 8 subject
 column, 9 field index, 10 subject index, 11 the entity lookup `tNp`, 12 one
 of the tenant tables' two indexes (`tno` 0; `col` 0 `dss_type_tno`, 1
-`dss_entity_rid`); `kind` is a value column's logical type, plus 256 for a
+`dss_entity_rid`), 13 the blind table, 14 its MAC index, 15 its subject
+index (the last three at `grp` 0, `col` 0); `kind` is a value column's logical type, plus 256 for a
 personal field, and an index's 0 once it is built, 512 while it is pending
 (section 3).
 
@@ -76,6 +79,16 @@ and derived, written in the same transaction and rebuilt from the truth by
 | --- | --- | --- |
 | `tN_n` | `rid`, `pub`, `del`: the newest state | `rid` |
 | `tN_cG` | `ent`, `item`, `vfrom`, `parent`, `ord`, `vC`...: the open versions | `ent, item` |
+
+and, for a type with a personal field (retired ones included), the blind
+table, which is truth while its subject exists and is not rebuilt:
+
+| Table | Columns | Key |
+| --- | --- | --- |
+| `tN_b` | `ent`, `item`, `vfrom` (the version it indexes), `fld` (the field's id), `subject` REFERENCE, `mac` BYTES (32), `kid`, `norm` | `ent, item, vfrom, fld` |
+
+A MAC is in this table and in no other: never a column of `tN_gG`, `tN_cG` or
+`tN_r`.
 
 Group 0 is the root group; a multiple scalar field is a one-column group whose
 column is 0. A personal field's value column holds the ciphertext (BYTES) and
@@ -145,6 +158,14 @@ index is built its field reads `GDEFSTOR_INDEX_INDEXING`
 (`gdefstor_type_index_state()`, answered from `dss_name`), and queries on it
 answer exactly the same, by reading the table.
 
+The blind table is a step of the first declaration of the type that has a
+personal field: the table in the declaring write, recorded (role 13), and its
+two indexes recorded pending (roles 14 and 15) and built after it, like every
+other. A type declared before the blind table existed gets it when its
+declaration next changes; until then a save with a MAC on it is
+`GDEFSTOR_ERR_UNSUPPORTED`. The layout version stays 1: the table is an
+additive step.
+
 The key store (section 8) is a port of its own: its one index,
 `dsk_ledger_seq`, is made with its table in the key store's first
 transaction, when that table is new and empty.
@@ -177,12 +198,15 @@ SELECT COUNT(*) FROM ...
 | `entity_find` | `dss_entity` by `pid`, then `tN_e JOIN tN_n` by `rid` |
 | `entity_insert` | the row counter; `tN_e`, `tN_n`, `dss_entity` rows |
 | `state_append` | the last `seq`; a `tN_s` row; `tN_n` updated |
-| `apply` | the commit sequence (once per write); for each close, the open version is read (it must be open), `vto` set, the current row deleted; each new version inserted into `tN_gG` and `tN_cG`; the `tN_r` row; `tN_e.rev` and `last_item` |
+| `apply` | the commit sequence (once per write); for each close, the open version is read (it must be open), `vto` set, the current row deleted; each new version inserted into `tN_gG` and `tN_cG`; each blind row into `tN_b`; the `tN_r` row; `tN_e.rev` and `last_item` |
 | `history` | `tN_r` and `tN_s` by `rid` |
-| `items` | each `tN_cG` by `ent`, or each `tN_gG` by `ent` and `vfrom <= ? AND (vto IS NULL OR vto > ?)` |
+| `items` | each `tN_cG` by `ent`, or each `tN_gG` by `ent` and `vfrom <= ? AND (vto IS NULL OR vto > ?)`; when the port asks, `tN_b` by `ent` |
+| `blind_history` | `SELECT ... FROM tN_b a0 JOIN tN_e a1 ON a1.rid = a0.ent JOIN tN_gG a2 ON a2.ent = a0.ent AND a2.item = a0.item AND a2.vfrom = a0.vfrom WHERE a0.fld = ? AND a0.mac = ?`, by `tN_bm` |
+| `subject_lookup` | `dss_name` by role 8 (every subject column), then for each `SELECT ... FROM tN_gG a0 JOIN tN_e a1 ON a1.rid = a0.ent WHERE a0.vCs = ?`, by `tN_jG_C`; never `tN_b` |
+| `blind_delete` | `dss_name` by role 13 (every blind table), then for each `DELETE FROM tN_b WHERE subject = ?`, by `tN_bs` |
 | drafts | upsert, select, delete on `dss_draft` |
 | `query` | the compiled total and page, in one read transaction |
-| `rebuild` | `dss_entity` and every `tN_n` and `tN_cG` emptied and refilled from the truth |
+| `rebuild` | `dss_entity` and every `tN_n` and `tN_cG` emptied and refilled from the truth; `tN_b` is not touched |
 | `dump` | every table read in key order |
 
 A read without the write's transaction opens a read connection and runs
@@ -204,6 +228,7 @@ becomes, with entity alias `a0` and its newest state `a1`:
 | `in` | `=` against the list; an empty list is false |
 | and, or, not | `(... AND ...)`, `(... OR ...)`, `(NOT ...)`; an empty and is true, an empty or false |
 | EXISTS T | `EXISTS (SELECT NULL FROM tM_e x JOIN tM_n y ON y.rid = x.rid WHERE ...)`; OUTER operands name `a0` |
+| BLIND (personal FIELD, MAC) | `owner.rid IN (SELECT b.ent FROM tN_b b JOIN tN_cG c ON c.ent = b.ent AND c.item = b.item AND c.vfrom = b.vfrom WHERE b.fld = ? AND b.mac = ?)`: the join on `vfrom` keeps an older version's MAC from matching |
 | sort key | a root field through `LEFT JOIN tN_c0 a2 ON a2.ent = a0.rid`, or a fact; `DESC`; `NULLS FIRST`/`LAST` where the engine differs |
 | tiebreak | `a0.rid` ascending, last, always |
 | page | `LIMIT ? OFFSET ?`; "every match" is `INT64_MAX` |
@@ -218,8 +243,8 @@ absent value adds nothing to the port's set.
 Refused with `GDEFSSQL_ERR_UNSUPPORTED` (through the backend,
 `GDEFSTOR_ERR_UNSUPPORTED`): COLUMN and CONST operands, a select, a numeric
 sort or tiebreak, more than four sort keys, a sort on anything but a single
-field of the root group, a fact or the public id, a personal, retired or group
-field, an EXISTS inside an EXISTS, an OUTER operand outside one, an unknown
+field of the root group, a fact or the public id, a personal (outside BLIND),
+retired or group field, an EXISTS inside an EXISTS, an OUTER operand outside one, an unknown
 node, operand, fact or flag, and two sides of different types or decimal
 scales. A statement with more parameters than the dialect allows is
 `GDEFSSQL_ERR_LIMIT`.
