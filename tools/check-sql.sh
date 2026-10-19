@@ -22,6 +22,8 @@ plant_control testQuery 'Compile.*'
 plant_control testAgreement 'Agreement.*'
 plant_control testConformance 'ModelHistory.*:ModelDerived.*'
 plant_control testKeystore 'KeyStore.*'
+plant_control testConformance 'ModelBlind.*'
+plant_control testBlind 'BlindSql.*'
 
 # An identifier made from the caller's field name, with the one gate on
 # identifiers (gdefssql_sb_ident's check) gone: caller text in SQL.
@@ -198,5 +200,56 @@ plant erasure-keeps-the-key src/keystore.c testKeystore \
   }
   if (rc == GDEFSTOR_OK) {
     rc = next_seq(&c, &seq);'
+
+# The blind index (story S5a). A MAC written into a revision row: the first
+# blind row's MAC as the revision's reason.
+plant mac-in-revision-row src/backend.c testBlind \
+  'BlindSql.NoMacIsInAnyTableButTheBlindTable' \
+  '    kv[5].v = dbytes(GDEFSSQL_DATUM_TEXT, r->why, r->why_len);' \
+  '    kv[5].v = a->blind_count > 0
+                  ? dbytes(GDEFSSQL_DATUM_TEXT, a->blinds[0].mac,
+                        GDEFSTOR_BLIND_MAC_BYTES)
+                  : dbytes(GDEFSSQL_DATUM_TEXT, r->why, r->why_len);'
+
+# The same defect, seen through the port by the conformance suite's dumps.
+plant mac-in-revision-row-dump src/backend.c testConformance \
+  'ModelBlind.NoMacIsInARevisionGroupOrCurrentRow' \
+  '    kv[5].v = dbytes(GDEFSSQL_DATUM_TEXT, r->why, r->why_len);' \
+  '    kv[5].v = a->blind_count > 0
+                  ? dbytes(GDEFSSQL_DATUM_TEXT, a->blinds[0].mac,
+                        GDEFSTOR_BLIND_MAC_BYTES)
+                  : dbytes(GDEFSSQL_DATUM_TEXT, r->why, r->why_len);'
+
+# Blind equality matching an older version: the blind row joined to the
+# item's current row by item alone, not by the version it indexes.
+plant blind-equality-older-version src/compile.c testConformance \
+  'ModelBlind.EqualityMatchesOnlyTheCurrentVersion' \
+  '  gdefssql_sb_kw(q->sb, " AND ");
+  gdefssql_sb_col(q->sb, c, "vfrom");
+  gdefssql_sb_kw(q->sb, " = ");
+  gdefssql_sb_col(q->sb, a, "vfrom");' \
+  ''
+
+# Blind deletion that misses one type: the last type with a blind table.
+plant blind-deletion-misses-a-type src/backend.c testConformance \
+  'ModelBlind.DeletionRemovesASubjectsBlindRowsInEveryType' \
+  '  for (i = 0; rc == GDEFSTOR_OK && i < n; i++) {
+    char t[GDEFSSQL_NAME_CAP];
+    GDEFSSQL_Datum v = dbytes(GDEFSSQL_DATUM_TEXT, subject, subject_len);' \
+  '  for (i = 0; rc == GDEFSTOR_OK && i + 1 < n; i++) {
+    char t[GDEFSSQL_NAME_CAP];
+    GDEFSSQL_Datum v = dbytes(GDEFSSQL_DATUM_TEXT, subject, subject_len);'
+
+# The blind table cleared by a rebuild, as if it were derived.
+plant rebuild-clears-blind src/backend.c testConformance \
+  'ModelBlind.RebuildLeavesTheBlindTableAlone' \
+  '      rc = rebuild_group(c, tno, &cat.groups[i]);
+    }' \
+  '      rc = rebuild_group(c, tno, &cat.groups[i]);
+    }
+    if (rc == GDEFSTOR_OK && cat_blind(&cat)) {
+      gdefssql_name_table(t, tno, GDEFSSQL_ROLE_BLIND, 0);
+      rc = delete_all(c, t);
+    }'
 
 plant_finish
