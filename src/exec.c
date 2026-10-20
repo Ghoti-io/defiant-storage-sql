@@ -254,6 +254,62 @@ GDEFSTOR_Result gdefssql_cx_counter(GDEFSSQL_Cx * c, int which,
   return rc;
 }
 
+GDEFSTOR_Result gdefssql_cx_counter_raise(GDEFSSQL_Cx * c, int which,
+    uint64_t v) {
+  const char * col = which == GDEFSSQL_COUNTER_ROW ? "last_row"
+                     : which == GDEFSSQL_COUNTER_TYPE ? "last_type"
+                                                      : "last_cseq";
+  GDEFSSQL_Sb sb;
+  GDEFSSQL_St s;
+  GDEFSTOR_Result rc;
+  int row = 0;
+  int64_t now = 0;
+  if (v > (uint64_t)INT64_MAX) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
+  gdefssql_sb_kw(&sb, "SELECT ");
+  gdefssql_sb_col(&sb, "a0", col);
+  gdefssql_sb_kw(&sb, " FROM ");
+  gdefssql_sb_table(&sb, "dss_counter");
+  gdefssql_sb_kw(&sb, " ");
+  gdefssql_sb_ident(&sb, "a0");
+  gdefssql_sb_kw(&sb, " WHERE ");
+  gdefssql_sb_col(&sb, "a0", "id");
+  gdefssql_sb_kw(&sb, " = ");
+  gdefssql_sb_int(&sb, 1);
+  rc = gdefssql_st_open(c, &sb, &s);
+  if (rc == GDEFSTOR_OK) {
+    rc = gdefssql_st_step(&s, &row);
+  }
+  if (rc == GDEFSTOR_OK && !row) {
+    rc = GDEFSTOR_ERR_CORRUPT;
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = gdefssql_st_int(&s, 0, &now, NULL);
+  }
+  gdefssql_st_close(&s);
+  if (rc == GDEFSTOR_OK && now < 0) {
+    rc = GDEFSTOR_ERR_CORRUPT;
+  }
+  if (rc == GDEFSTOR_OK && (uint64_t)now < v) {
+    gdefssql_sb_reset(&sb);
+    gdefssql_sb_kw(&sb, "UPDATE ");
+    gdefssql_sb_table(&sb, "dss_counter");
+    gdefssql_sb_kw(&sb, " SET ");
+    gdefssql_sb_ident(&sb, col);
+    gdefssql_sb_kw(&sb, " = ");
+    gdefssql_sb_int(&sb, (int64_t)v);
+    gdefssql_sb_kw(&sb, " WHERE ");
+    gdefssql_sb_ident(&sb, "id");
+    gdefssql_sb_kw(&sb, " = ");
+    gdefssql_sb_int(&sb, 1);
+    rc = gdefssql_cx_run(c, &sb);
+  }
+  gdefssql_sb_free(&sb);
+  return rc;
+}
+
 /* ---- the catalog ---------------------------------------------------------- */
 
 void gdefssql_cat_free(GDEFSSQL_Cat * cat) {

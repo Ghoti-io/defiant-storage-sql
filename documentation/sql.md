@@ -251,6 +251,9 @@ SELECT COUNT(*) FROM ...
 | `outbox_claim` | `SELECT COUNT(*) ... WHERE parked = ? AND stream = ? AND lease > ?`; when 0, `SELECT ... WHERE stream = ? AND parked = ? ORDER BY seq LIMIT ? OFFSET ?` and an update of each row's `lease` |
 | `outbox_delete`, `outbox_fail` | `dss_outbox_id` by `pid`, the row's `fails` and `parked`, then the deletes from both tables (never of a parked row) or one update |
 | `outbox_parked` | `SELECT COUNT(*) FROM dss_outbox WHERE parked = ? [AND stream = ?]` |
+| `restore_revision` | as `apply`, with the given commit sequence in the `tN_r` row; `SELECT last_cseq FROM dss_counter WHERE id = 1`, and an update to the given one when it is larger (a snapshot import, story S6a3) |
+| `restore_counter` | as `counter_next`'s select, then the update or insert of `last` at the given value; `kept` is left as it is |
+| `restore_outbox` | as `outbox_insert`, with the row's `lease`, `fails` and `parked` as given |
 | `query` | the compiled total and page, in one read transaction |
 | `rebuild` | `dss_entity` and every `tN_n` and `tN_cG` emptied and refilled from the truth; `tN_b` and the tables of story S6a are not touched |
 | `dump` | every table read in key order |

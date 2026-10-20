@@ -40,6 +40,7 @@
 #define gdefssql_st_bytes GHOTIIO_DEFSSQL(gdefssql_st_bytes)
 #define gdefssql_st_close GHOTIIO_DEFSSQL(gdefssql_st_close)
 #define gdefssql_cx_counter GHOTIIO_DEFSSQL(gdefssql_cx_counter)
+#define gdefssql_cx_counter_raise GHOTIIO_DEFSSQL(gdefssql_cx_counter_raise)
 #define gdefssql_cat_load GHOTIIO_DEFSSQL(gdefssql_cat_load)
 #define gdefssql_cat_free GHOTIIO_DEFSSQL(gdefssql_cat_free)
 #define gdefssql_cat_group GHOTIIO_DEFSSQL(gdefssql_cat_group)
@@ -101,6 +102,11 @@ void gdefssql_st_close(GDEFSSQL_St * s);
 enum { GDEFSSQL_COUNTER_ROW, GDEFSSQL_COUNTER_TYPE, GDEFSSQL_COUNTER_CSEQ };
 GDEFSTOR_Result gdefssql_cx_counter(GDEFSSQL_Cx * c, int which,
     uint64_t * out);
+
+/* dss_counter: raise @p which to at least @p v (an import's commit
+ * sequence), leaving a larger value as it is. */
+GDEFSTOR_Result gdefssql_cx_counter_raise(GDEFSSQL_Cx * c, int which,
+    uint64_t v);
 
 /* ---- a type's catalog (dss_name) ----------------------------------------- */
 

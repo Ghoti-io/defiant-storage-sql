@@ -1770,10 +1770,14 @@ static GDEFSTOR_Result insert_version(Cx * c, uint32_t tno,
   return rc;
 }
 
-static GDEFSTOR_Result m_apply(void * ctx, void * txn,
-    const GDEFSTOR_ModelApply * a) {
+/* `apply`, or with @p restore an import's revision (model_backend.h), whose
+ * row keeps the commit sequence it is given and raises the tenant's
+ * counter to it, instead of taking the write's. */
+static GDEFSTOR_Result apply_revision(void * ctx, void * txn,
+    const GDEFSTOR_ModelApply * a, int restore) {
   Back * b = (Back *)ctx;
   Txn * x = (Txn *)txn;
+  uint64_t cseq = 0;
   const GDEFSTOR_ModelRevision * r;
   GDEFSSQL_Cat cat;
   uint32_t tno = 0;
@@ -1804,12 +1808,22 @@ static GDEFSTOR_Result m_apply(void * ctx, void * txn,
   if (rc != GDEFSTOR_OK) {
     return rc;
   }
-  if (x->cseq == 0) {
-    /* One commit sequence for every revision this write makes. */
-    rc = gdefssql_cx_counter(&x->cx, GDEFSSQL_COUNTER_CSEQ, &x->cseq);
-    if (rc != GDEFSTOR_OK) {
-      x->cseq = 0;
+  if (restore) {
+    cseq = r->commit_seq;
+    if (cseq == 0 || !fits(cseq)) {
+      rc = GDEFSTOR_ERR_INVALID;
+    } else {
+      rc = gdefssql_cx_counter_raise(&x->cx, GDEFSSQL_COUNTER_CSEQ, cseq);
     }
+  } else {
+    if (x->cseq == 0) {
+      /* One commit sequence for every revision this write makes. */
+      rc = gdefssql_cx_counter(&x->cx, GDEFSSQL_COUNTER_CSEQ, &x->cseq);
+      if (rc != GDEFSTOR_OK) {
+        x->cseq = 0;
+      }
+    }
+    cseq = x->cseq;
   }
   for (i = 0; rc == GDEFSTOR_OK && i < a->close_count; i++) {
     if (gdefssql_cat_group(&cat, a->closes[i].group) == NULL) {
@@ -1834,7 +1848,7 @@ static GDEFSTOR_Result m_apply(void * ctx, void * txn,
     kv[1].col = "rev";
     kv[1].v = dint((int64_t)r->revision);
     kv[2].col = "cseq";
-    kv[2].v = dint((int64_t)x->cseq);
+    kv[2].v = dint((int64_t)cseq);
     kv[3].col = "who";
     kv[3].v = dbytes(GDEFSSQL_DATUM_TEXT, r->who, r->who_len);
     kv[4].col = "at";
@@ -1862,6 +1876,16 @@ static GDEFSTOR_Result m_apply(void * ctx, void * txn,
     gdefssql_sb_free(&sb);
   }
   return rc;
+}
+
+static GDEFSTOR_Result m_apply(void * ctx, void * txn,
+    const GDEFSTOR_ModelApply * a) {
+  return apply_revision(ctx, txn, a, 0);
+}
+
+static GDEFSTOR_Result m_restore_revision(void * ctx, void * txn,
+    const GDEFSTOR_ModelApply * a) {
+  return apply_revision(ctx, txn, a, 1);
 }
 
 static GDEFSTOR_Result m_history(void * ctx, void * txn, const char * tenant,
@@ -3548,16 +3572,16 @@ static GDEFSTOR_Result outbox_locate(Cx * c, const char * pid, size_t pid_len,
   return rc;
 }
 
-static GDEFSTOR_Result m_outbox_insert(void * ctx, void * txn,
-    const GDEFSTOR_ModelOutbox * o) {
-  Txn * x = (Txn *)txn;
+/* Insert an outbox row: as an append makes it (no lease, no failure, not
+ * parked), or with @p restore as an import gives it. */
+static GDEFSTOR_Result outbox_put(Txn * x, const GDEFSTOR_ModelOutbox * o,
+    int restore) {
   Kv kv[8];
   int found = 0;
   char * stream = NULL;
   size_t stream_len = 0;
   int64_t seq = 0;
   GDEFSTOR_Result rc;
-  (void)ctx;
   if (x == NULL || o == NULL || o->stream == NULL || o->public_id == NULL ||
       o->format == NULL || (o->payload == NULL && o->payload_len != 0) ||
       !fits(o->seq)) {
@@ -3585,11 +3609,11 @@ static GDEFSTOR_Result m_outbox_insert(void * ctx, void * txn,
   kv[4].col = "body";
   kv[4].v = dbytes(GDEFSSQL_DATUM_BYTES, o->payload, o->payload_len);
   kv[5].col = "lease";
-  kv[5].v = dint(0);
+  kv[5].v = dint(restore ? o->lease_until_ms : 0);
   kv[6].col = "fails";
-  kv[6].v = dint(0);
+  kv[6].v = dint(restore ? (int64_t)o->failures : 0);
   kv[7].col = "parked";
-  kv[7].v = dint(0);
+  kv[7].v = dint(restore && o->parked ? 1 : 0);
   rc = insert(&x->cx, "dss_outbox", kv, 8);
   if (rc == GDEFSTOR_OK) {
     Kv id[3];
@@ -3597,6 +3621,40 @@ static GDEFSTOR_Result m_outbox_insert(void * ctx, void * txn,
     id[1] = kv[0];
     id[2] = kv[1];
     rc = insert(&x->cx, "dss_outbox_id", id, 3);
+  }
+  return rc;
+}
+
+static GDEFSTOR_Result m_outbox_insert(void * ctx, void * txn,
+    const GDEFSTOR_ModelOutbox * o) {
+  (void)ctx;
+  return outbox_put((Txn *)txn, o, 0);
+}
+
+static GDEFSTOR_Result m_restore_outbox(void * ctx, void * txn,
+    const GDEFSTOR_ModelOutbox * o) {
+  (void)ctx;
+  return outbox_put((Txn *)txn, o, 1);
+}
+
+/* An import's counter: its committed value once @p txn commits. Its floor
+ * (kept) is left as it is. */
+static GDEFSTOR_Result m_restore_counter(void * ctx, void * txn, int kind,
+    const char * name, size_t name_len, uint64_t value) {
+  Txn * x = (Txn *)txn;
+  int found = 0;
+  int64_t last = 0;
+  int64_t kept = 0;
+  GDEFSTOR_Result rc;
+  (void)ctx;
+  if (x == NULL || name == NULL || !fits(value) ||
+      (kind != GDEFSTOR_MODEL_COUNTER && kind != GDEFSTOR_MODEL_STREAM)) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  rc = seq_read(&x->cx, kind, name, name_len, &found, &last, &kept);
+  if (rc == GDEFSTOR_OK) {
+    rc = seq_write(&x->cx, kind, name, name_len, found, "last",
+        (int64_t)value);
   }
   return rc;
 }
@@ -4233,5 +4291,9 @@ GDEFSSQL_Result gdefssql_model_backend(const GDEFSSQL_Dialect * dialect,
   out->outbox_parked = m_outbox_parked;
   out->lang_ctx = b;
   out->languages = m_languages;
+  out->restore_ctx = b;
+  out->restore_revision = m_restore_revision;
+  out->restore_counter = m_restore_counter;
+  out->restore_outbox = m_restore_outbox;
   return GDEFSSQL_OK;
 }
