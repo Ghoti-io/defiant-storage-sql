@@ -244,6 +244,7 @@ SELECT COUNT(*) FROM ...
 | `blind_history` | `SELECT ... FROM tN_b a0 JOIN tN_e a1 ON a1.rid = a0.ent JOIN tN_gG a2 ON a2.ent = a0.ent AND a2.item = a0.item AND a2.vfrom = a0.vfrom WHERE a0.fld = ? AND a0.mac = ?`, by `tN_bm` |
 | `subject_lookup` | `dss_name` by role 8 (every subject column), then for each `SELECT ... FROM tN_gG a0 JOIN tN_e a1 ON a1.rid = a0.ent WHERE a0.vCs = ?`, by `tN_jG_C`; never `tN_b` |
 | `blind_delete` | `dss_name` by role 13 (every blind table), then for each `DELETE FROM tN_b WHERE subject = ?`, by `tN_bs` |
+| `blind_put` | the entity's `tN` from `dss_entity`; `DELETE FROM tN_b WHERE ent = ? AND item = ? AND vfrom = ? AND fld = ?`, then the row inserted (story S6c: the blind index rebuilt from decryptable values; no index covers `ent`, so a rebuild of a large tenant reads the blind table once per row it puts) |
 | drafts | upsert, select, delete on `dss_draft` |
 | records | upsert on `dss_record`; select by `ns, rkey`; delete after a select; a list `WHERE ns = ? AND rkey >= ? AND rkey < ? ORDER BY ns, rkey LIMIT ? OFFSET ?` (the upper bound is the prefix with its last byte one higher) |
 | `counter_next` | `SELECT last, kept FROM dss_seq WHERE kind = ? AND name = ?`, then the update or insert of `last` |

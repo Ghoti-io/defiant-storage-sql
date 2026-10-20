@@ -23,6 +23,7 @@ plant_control testAgreement 'Agreement.*'
 plant_control testConformance 'ModelHistory.*:ModelDerived.*'
 plant_control testKeystore 'KeyStore.*'
 plant_control testConformance 'ModelBlind.*'
+plant_control testConformance 'ModelBlindPut.*'
 plant_control testBlind 'BlindSql.*'
 plant_control testConformance 'ModelRecords.*:ModelCounters.*:ModelOutbox.*:ModelSystem.*'
 plant_control testConformance 'ModelLanguage*'
@@ -241,6 +242,22 @@ plant blind-deletion-misses-a-type src/backend.c testConformance \
   '  for (i = 0; rc == GDEFSTOR_OK && i + 1 < n; i++) {
     char t[GDEFSSQL_NAME_CAP];
     GDEFSSQL_Datum v = dbytes(GDEFSSQL_DATUM_TEXT, subject, subject_len);'
+
+# A blind row put back beside the one the version already has: the delete
+# that makes room for it is never run, so a rebuild run twice leaves two rows
+# per version (story S6c).
+plant blind-put-keeps-the-old-row src/backend.c testConformance \
+  'ModelBlindPut.PuttingTheRowsBackRebuildsTheBlindIndex' \
+  '    rc = gdefssql_cx_run(&x->cx, &sb);
+    gdefssql_sb_free(&sb);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = insert_blind(&x->cx, t, row, bl, bl->valid_from);' \
+  '    rc = GDEFSTOR_OK;
+    gdefssql_sb_free(&sb);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = insert_blind(&x->cx, t, row, bl, bl->valid_from);'
 
 # The blind table cleared by a rebuild, as if it were derived.
 plant rebuild-clears-blind src/backend.c testConformance \

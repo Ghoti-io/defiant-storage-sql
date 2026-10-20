@@ -974,6 +974,31 @@ static GDEFSTOR_Result visit_blinds(Cx * c, uint32_t tno, uint64_t rid,
   return rc;
 }
 
+/* One row of blind table @p t: entity @p row, version (item, @p vfrom). */
+static GDEFSTOR_Result insert_blind(Cx * c, const char * t, uint64_t row,
+    const GDEFSTOR_ModelBlind * b, uint64_t vfrom) {
+  Kv kv[9];
+  kv[0].col = "ent";
+  kv[0].v = dint((int64_t)row);
+  kv[1].col = "item";
+  kv[1].v = dint((int64_t)b->item);
+  kv[2].col = "vfrom";
+  kv[2].v = dint((int64_t)vfrom);
+  kv[3].col = "fld";
+  kv[3].v = dint(b->field);
+  kv[4].col = "subject";
+  kv[4].v = dbytes(GDEFSSQL_DATUM_TEXT, b->subject, b->subject_len);
+  kv[5].col = "mac";
+  kv[5].v = dbytes(GDEFSSQL_DATUM_BYTES, b->mac, GDEFSTOR_BLIND_MAC_BYTES);
+  kv[6].col = "kid";
+  kv[6].v = dint(b->key_id);
+  kv[7].col = "norm";
+  kv[7].v = dint(b->version);
+  kv[8].col = "lang";
+  kv[8].v = dbytes(GDEFSSQL_DATUM_TEXT, b->language, b->language_len);
+  return insert(c, t, kv, 9);
+}
+
 /* Insert the blind rows of one apply, each for a version it inserted. */
 static GDEFSTOR_Result insert_blinds(Cx * c, uint32_t tno,
     const GDEFSSQL_Cat * cat, const GDEFSTOR_ModelApply * a, uint64_t rev) {
@@ -994,7 +1019,6 @@ static GDEFSTOR_Result insert_blinds(Cx * c, uint32_t tno,
   gdefssql_name_table(t, tno, GDEFSSQL_ROLE_BLIND, 0);
   for (i = 0; rc == GDEFSTOR_OK && i < a->blind_count; i++) {
     const GDEFSTOR_ModelBlind * b = &a->blinds[i];
-    Kv kv[9];
     size_t k;
     int indexed = 0;
     for (k = 0; k < a->insert_count; k++) {
@@ -1007,25 +1031,7 @@ static GDEFSTOR_Result insert_blinds(Cx * c, uint32_t tno,
         b->language == NULL || b->language_len == 0) {
       return GDEFSTOR_ERR_INTERNAL;
     }
-    kv[0].col = "ent";
-    kv[0].v = dint((int64_t)a->row);
-    kv[1].col = "item";
-    kv[1].v = dint((int64_t)b->item);
-    kv[2].col = "vfrom";
-    kv[2].v = dint((int64_t)rev);
-    kv[3].col = "fld";
-    kv[3].v = dint(b->field);
-    kv[4].col = "subject";
-    kv[4].v = dbytes(GDEFSSQL_DATUM_TEXT, b->subject, b->subject_len);
-    kv[5].col = "mac";
-    kv[5].v = dbytes(GDEFSSQL_DATUM_BYTES, b->mac, GDEFSTOR_BLIND_MAC_BYTES);
-    kv[6].col = "kid";
-    kv[6].v = dint(b->key_id);
-    kv[7].col = "norm";
-    kv[7].v = dint(b->version);
-    kv[8].col = "lang";
-    kv[8].v = dbytes(GDEFSSQL_DATUM_TEXT, b->language, b->language_len);
-    rc = insert(c, t, kv, 9);
+    rc = insert_blind(c, t, a->row, b, rev);
   }
   return rc;
 }
@@ -3078,6 +3084,65 @@ static GDEFSTOR_Result m_blind_delete(void * ctx, void * txn,
   return rc;
 }
 
+/* A blind row put back (gdefstor_blind_put(), story S6c), for a version the
+ * port found: the row the version already has for the field is deleted
+ * first, so a rebuild run twice leaves one. */
+static GDEFSTOR_Result m_blind_put(void * ctx, void * txn,
+    const GDEFSTOR_Type * type, uint64_t row, const GDEFSTOR_ModelBlind * bl) {
+  Txn * x = (Txn *)txn;
+  GDEFSSQL_Cat cat;
+  uint32_t tno = 0;
+  int blind = 0;
+  char t[GDEFSSQL_NAME_CAP];
+  GDEFSTOR_Result rc;
+  (void)ctx;
+  (void)type;
+  if (x == NULL || bl == NULL || bl->mac == NULL || !fits(row) ||
+      !fits(bl->item) || !fits(bl->valid_from) ||
+      (bl->subject == NULL && bl->subject_len != 0) || bl->language == NULL ||
+      bl->language_len == 0) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  rc = entity_tno(&x->cx, row, &tno);
+  if (rc == GDEFSTOR_ERR_INVALID) {
+    rc = GDEFSTOR_ERR_INTERNAL;
+  }
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  rc = gdefssql_cat_load(&x->cx, tno, &cat);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  blind = cat_blind(&cat);
+  gdefssql_cat_free(&cat);
+  if (!blind) {
+    /* A type declared before the blind table existed, as in insert_blinds. */
+    return GDEFSTOR_ERR_UNSUPPORTED;
+  }
+  gdefssql_name_table(t, tno, GDEFSSQL_ROLE_BLIND, 0);
+  {
+    GDEFSSQL_Datum ent = dint((int64_t)row);
+    GDEFSSQL_Datum item = dint((int64_t)bl->item);
+    GDEFSSQL_Datum from_rev = dint((int64_t)bl->valid_from);
+    GDEFSSQL_Datum fld = dint(bl->field);
+    Sb sb;
+    sb_open(&sb, &x->cx);
+    gdefssql_sb_kw(&sb, "DELETE FROM ");
+    gdefssql_sb_table(&sb, t);
+    bare_eq(&sb, " WHERE ", "ent", &ent);
+    bare_eq(&sb, " AND ", "item", &item);
+    bare_eq(&sb, " AND ", "vfrom", &from_rev);
+    bare_eq(&sb, " AND ", "fld", &fld);
+    rc = gdefssql_cx_run(&x->cx, &sb);
+    gdefssql_sb_free(&sb);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = insert_blind(&x->cx, t, row, bl, bl->valid_from);
+  }
+  return rc;
+}
+
 /* ---- records, counters and the outbox (story S6a) ------------------------ */
 
 /* The tenant tables dss_record (ns, rkey) -> body; dss_seq (kind, name) ->
@@ -4295,5 +4360,6 @@ GDEFSSQL_Result gdefssql_model_backend(const GDEFSSQL_Dialect * dialect,
   out->restore_revision = m_restore_revision;
   out->restore_counter = m_restore_counter;
   out->restore_outbox = m_restore_outbox;
+  out->blind_put = m_blind_put;
   return GDEFSSQL_OK;
 }
