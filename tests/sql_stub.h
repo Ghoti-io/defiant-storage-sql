@@ -263,7 +263,7 @@ inline const std::set<std::string> & Keywords() {
       "DELETE", "CREATE", "TABLE", "IF", "INDEX", "UNIQUE", "PRIMARY", "KEY",
       "ALTER", "ADD", "COLUMN", "RETURNING", "CONFLICT", "DO", "EXCLUDED",
       "DUPLICATE", "CONCURRENTLY", "SCHEMA", "DROP", "SAVEPOINT", "ROLLBACK",
-      "TO"};
+      "TO", "COALESCE", "NULLIF"};
   return k;
 }
 
@@ -488,7 +488,7 @@ struct Select;
 
 struct Expr {
   enum K { COL, PARAM, NUL, COUNT, ADD, CMP, AND, OR, NOT, ISNULL, NOTNULL,
-      INLIST, INSUB, EXISTS, VALUESOF };
+      INLIST, INSUB, EXISTS, VALUESOF, SUBVAL, COALESCE, NULLIF };
   K k = NUL;
   std::string alias;
   std::string col;
@@ -812,6 +812,24 @@ class Parser {
     if (Kw("EXCLUDED")) {
       throw std::runtime_error("EXCLUDED outside an upsert");
     }
+    if (IsPunct("(") && t_[i_ + 1].t == T_KW && t_[i_ + 1].s == "SELECT") {
+      /* A scalar subquery: its first row's first column, or NULL. */
+      Next();
+      e->k = Expr::SUBVAL;
+      e->sub = SelectBody();
+      Punct(")");
+      return e;
+    }
+    if (IsKw("COALESCE") || IsKw("NULLIF")) {
+      e->k = IsKw("COALESCE") ? Expr::COALESCE : Expr::NULLIF;
+      Next();
+      Punct("(");
+      e->kids.push_back(Operand());
+      Punct(",");
+      e->kids.push_back(Operand());
+      Punct(")");
+      return e;
+    }
     e->k = Expr::COL;
     e->alias = Id();
     if (IsPunct(".")) {
@@ -913,7 +931,8 @@ class Parser {
       Punct(")");
       return e;
     }
-    if (IsPunct("(")) {
+    if (IsPunct("(") &&
+        !(t_[i_ + 1].t == T_KW && t_[i_ + 1].s == "SELECT")) {
       Next();
       ExprP e = Cond();
       Punct(")");
@@ -1085,6 +1104,25 @@ inline Val Eval(const Ctx & c, const Expr & e, std::vector<Frame> & fr) {
   }
   case Expr::EXISTS:
     return Truth(!RunSelect(c, *e.sub, fr).rows.empty());
+  case Expr::SUBVAL: {
+    Result r = RunSelect(c, *e.sub, fr);
+    if (r.rows.empty()) {
+      return Val();
+    }
+    return r.rows[0][0];
+  }
+  case Expr::COALESCE: {
+    Val a = Eval(c, *e.kids[0], fr);
+    return a.k != V_NULL ? a : Eval(c, *e.kids[1], fr);
+  }
+  case Expr::NULLIF: {
+    Val a = Eval(c, *e.kids[0], fr);
+    Val b = Eval(c, *e.kids[1], fr);
+    if (a.k != V_NULL && b.k != V_NULL && Compare(a, b) == 0) {
+      return Val();
+    }
+    return a;
+  }
   default:
     throw std::runtime_error("an expression this engine cannot evaluate");
   }
@@ -2097,6 +2135,10 @@ struct Collected {
     std::vector<std::vector<std::string>> bytes;
     std::vector<std::vector<std::string>> subjects;
     std::vector<B> blinds;
+    /* The newest revision, when the scan is asked for it. */
+    bool have_rev = false;
+    GDEFSTOR_ModelRevision rev;
+    std::string who, why, rlangs;
   };
   std::map<uint64_t, E> ents;
 };
@@ -2150,6 +2192,27 @@ inline GDEFSTOR_Result C_blind(void * ctx, uint64_t row, const GDEFSTOR_ModelBli
   return GDEFSTOR_OK;
 }
 
+/* Revisions are truth: the newest of each entity, from the truth dump. */
+inline GDEFSTOR_Result C_revision(void * ctx, uint64_t row,
+    const GDEFSTOR_ModelRevision * r) {
+  Collected * c = (Collected *)ctx;
+  auto it = c->ents.find(row);
+  if (it == c->ents.end()) {
+    return GDEFSTOR_ERR_CORRUPT; /* a revision of no entity */
+  }
+  Collected::E & x = it->second;
+  if (x.have_rev && r->revision < x.rev.revision) {
+    return GDEFSTOR_OK;
+  }
+  x.have_rev = true;
+  x.rev = *r;
+  x.who.assign(r->who == nullptr ? "" : r->who, r->who_len);
+  x.why.assign(r->why == nullptr ? "" : r->why, r->why_len);
+  x.rlangs.assign(r->languages == nullptr ? "" : r->languages,
+      r->languages_len);
+  return GDEFSTOR_OK;
+}
+
 inline GDEFSTOR_Result TeeScan(void * ctx, const char * type, size_t type_len,
     const GDEFSTOR_ModelVisitor * visitor) {
   ScanCtx * s = (ScanCtx *)ctx;
@@ -2164,11 +2227,12 @@ inline GDEFSTOR_Result TeeScan(void * ctx, const char * type, size_t type_len,
   if (rc != GDEFSTOR_OK) {
     return rc;
   }
-  if (visitor->blind != nullptr) {
+  if (visitor->blind != nullptr || visitor->revision != nullptr) {
     GDEFSTOR_ModelVisitor bv;
     std::memset(&bv, 0, sizeof bv);
     bv.ctx = &col;
-    bv.blind = C_blind;
+    bv.blind = visitor->blind != nullptr ? C_blind : nullptr;
+    bv.revision = visitor->revision != nullptr ? C_revision : nullptr;
     rc = s->tee->inner.dump(s->tee->inner.ctx, s->tenant, s->tenant_len,
         GDEFSTOR_MODEL_TRUTH, &bv);
     if (rc != GDEFSTOR_OK) {
@@ -2200,6 +2264,12 @@ inline GDEFSTOR_Result TeeScan(void * ctx, const char * type, size_t type_len,
       x.blinds[i].b.mac = (const uint8_t *)x.blinds[i].mac.data();
       x.blinds[i].b.language = x.blinds[i].lang.data();
       rc = visitor->blind(visitor->ctx, x.e.row, &x.blinds[i].b);
+    }
+    if (rc == GDEFSTOR_OK && visitor->revision != nullptr && x.have_rev) {
+      x.rev.who = x.who.data();
+      x.rev.why = x.why.data();
+      x.rev.languages = x.rlangs.data();
+      rc = visitor->revision(visitor->ctx, x.e.row, &x.rev);
     }
     if (rc != GDEFSTOR_OK) {
       return rc;

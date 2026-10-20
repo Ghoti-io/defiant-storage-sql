@@ -53,6 +53,8 @@ typedef struct Scope {
   uint32_t tno;
   char e[GDEFSSQL_NAME_CAP]; /* the entity table's alias */
   char n[GDEFSSQL_NAME_CAP]; /* the newest state's alias */
+  const char * lang;         /* the language its fields read */
+  size_t lang_len;
 } Scope;
 
 typedef struct Qc {
@@ -76,10 +78,12 @@ typedef struct Src {
   const Scope * owner;
   uint32_t grp;
   uint32_t col;
+  int empty; /* EMPTY_IF_NONE: no value reads as the empty text */
   /* SCALAR */
   const char * alias;
   const char * column;
   int nullable;
+  const Scope * who; /* META REVISION_WHO of this scope's entity */
   /* VALUES */
   const GDEFSTOR_Value * values;
   size_t nvalues;
@@ -137,15 +141,45 @@ static int resolve_field(const GDEFSTOR_Type * t, const char * path,
          (out->flags & GDEFSTOR_FIELD_PERSONAL) == 0;
 }
 
+static void resolve_kind(Qc * q, const GDEFSTOR_QueryOperand * o,
+    const Scope * s, int is_outer, Src * out);
+
 static void resolve(Qc * q, const GDEFSTOR_QueryOperand * o,
     const Scope * here, const Scope * outer, Src * out) {
   int is_outer = (o->flags & GDEFSTOR_QUERY_OUTER) != 0;
   const Scope * s = is_outer ? outer : here;
   memset(out, 0, sizeof *out);
-  if ((o->flags & ~GDEFSTOR_QUERY_OUTER) != 0 || (is_outer && outer == NULL)) {
+  if ((o->flags & ~(GDEFSTOR_QUERY_OUTER | GDEFSTOR_QUERY_EMPTY_IF_NONE |
+           GDEFSTOR_QUERY_AS_TEXT)) != 0 ||
+      (is_outer && outer == NULL)) {
     refuse(q, GDEFSTOR_ERR_UNSUPPORTED);
     return;
   }
+  resolve_kind(q, o, s, is_outer, out);
+  if (failed(q)) {
+    return;
+  }
+  if ((o->flags & GDEFSTOR_QUERY_EMPTY_IF_NONE) != 0) {
+    /* A text or reference field with no value is the empty text. */
+    if (out->kind != SRC_FIELD || (out->type != GDEFSTOR_FIELD_TEXT &&
+                                      out->type != GDEFSTOR_FIELD_REFERENCE)) {
+      refuse(q, GDEFSTOR_ERR_UNSUPPORTED);
+      return;
+    }
+    out->empty = 1;
+  }
+  if ((o->flags & GDEFSTOR_QUERY_AS_TEXT) != 0) {
+    /* A reference compared by its bytes: the columns are text already. */
+    if (out->kind == SRC_VALUES || out->type != GDEFSTOR_FIELD_REFERENCE) {
+      refuse(q, GDEFSTOR_ERR_UNSUPPORTED);
+      return;
+    }
+    out->type = GDEFSTOR_FIELD_TEXT;
+  }
+}
+
+static void resolve_kind(Qc * q, const GDEFSTOR_QueryOperand * o,
+    const Scope * s, int is_outer, Src * out) {
   switch (o->kind) {
   case GDEFSTOR_QUERY_FIELD: {
     GDEFSTOR_FieldInfo f;
@@ -218,6 +252,11 @@ static void resolve(Qc * q, const GDEFSTOR_QueryOperand * o,
       out->alias = s->e;
       out->column = "rev";
       out->type = GDEFSTOR_FIELD_INTEGER;
+      return;
+    case GDEFSTOR_META_REVISION_WHO:
+      out->who = s;
+      out->type = GDEFSTOR_FIELD_REFERENCE;
+      out->nullable = 1;
       return;
     default:
       refuse(q, GDEFSTOR_ERR_UNSUPPORTED);
@@ -296,16 +335,26 @@ static void value_param(Qc * q, const GDEFSTOR_Value * v) {
   gdefssql_sb_param(q->sb, &d);
 }
 
-/* `alias.lang = ?`, the query's language: what scopes every current-table
- * read to one language's items. */
-static void in_language(Qc * q, const char * alias) {
+/* `alias.lang = ?`, the language @p s reads (the query's, or an EXISTS's
+ * own): what scopes every current-table read to one language's items. */
+static void in_language(Qc * q, const Scope * s, const char * alias) {
   GDEFSSQL_Datum d;
   memset(&d, 0, sizeof d);
   d.kind = GDEFSSQL_DATUM_TEXT;
-  d.bytes = (const uint8_t *)q->plan->query->language;
-  d.len = q->plan->query->language_len;
+  d.bytes = (const uint8_t *)s->lang;
+  d.len = s->lang_len;
   gdefssql_sb_col(q->sb, alias, "lang");
   gdefssql_sb_kw(q->sb, " = ");
+  gdefssql_sb_param(q->sb, &d);
+}
+
+/* The empty text, bound. */
+static void empty_param(Qc * q) {
+  GDEFSSQL_Datum d;
+  memset(&d, 0, sizeof d);
+  d.kind = GDEFSSQL_DATUM_TEXT;
+  d.bytes = (const uint8_t *)"";
+  d.len = 0;
   gdefssql_sb_param(q->sb, &d);
 }
 
@@ -317,6 +366,33 @@ static void field_col(Qc * q, const char * alias, const Src * f) {
 }
 
 static void scalar(Qc * q, const Src * s) {
+  if (s->who != NULL) {
+    /* (SELECT NULLIF(r.who, '') FROM tN_r r WHERE r.rid = e.rid AND r.rev =
+     * e.rev): the newest revision's author, none for the system's or for no
+     * revision, by the revision table's key. */
+    char a[GDEFSSQL_NAME_CAP];
+    char t[GDEFSSQL_NAME_CAP];
+    next_alias(q, a);
+    gdefssql_sb_kw(q->sb, "(SELECT NULLIF(");
+    gdefssql_sb_col(q->sb, a, "who");
+    gdefssql_sb_kw(q->sb, ", ");
+    empty_param(q);
+    gdefssql_sb_kw(q->sb, ") FROM ");
+    gdefssql_name_table(t, s->who->tno, GDEFSSQL_ROLE_REVISION, 0);
+    gdefssql_sb_table(q->sb, t);
+    gdefssql_sb_kw(q->sb, " ");
+    gdefssql_sb_ident(q->sb, a);
+    gdefssql_sb_kw(q->sb, " WHERE ");
+    gdefssql_sb_col(q->sb, a, "rid");
+    gdefssql_sb_kw(q->sb, " = ");
+    gdefssql_sb_col(q->sb, s->who->e, "rid");
+    gdefssql_sb_kw(q->sb, " AND ");
+    gdefssql_sb_col(q->sb, a, "rev");
+    gdefssql_sb_kw(q->sb, " = ");
+    gdefssql_sb_col(q->sb, s->who->e, "rev");
+    gdefssql_sb_kw(q->sb, ")");
+    return;
+  }
   gdefssql_sb_col(q->sb, s->alias, s->column);
 }
 
@@ -376,7 +452,7 @@ static void field_in(Qc * q, int op, const Src * l, const Src * r) {
   gdefssql_sb_kw(q->sb, " ");
   gdefssql_sb_ident(q->sb, a);
   gdefssql_sb_kw(q->sb, " WHERE ");
-  in_language(q, a);
+  in_language(q, f->owner, a);
   gdefssql_sb_kw(q->sb, " AND ");
   if (l->kind == SRC_VALUES || r->kind == SRC_VALUES) {
     against_values(q, op, l, r, a);
@@ -412,13 +488,13 @@ static void field_field(Qc * q, int op, const Src * l, const Src * r) {
   gdefssql_sb_kw(q->sb, " = ");
   gdefssql_sb_col(q->sb, r->owner->e, "rid");
   gdefssql_sb_kw(q->sb, " AND ");
-  in_language(q, b);
+  in_language(q, r->owner, b);
   gdefssql_sb_kw(q->sb, " WHERE ");
   gdefssql_sb_col(q->sb, a, "ent");
   gdefssql_sb_kw(q->sb, " = ");
   gdefssql_sb_col(q->sb, l->owner->e, "rid");
   gdefssql_sb_kw(q->sb, " AND ");
-  in_language(q, a);
+  in_language(q, l->owner, a);
   gdefssql_sb_kw(q->sb, " AND ");
   field_col(q, a, l);
   gdefssql_sb_kw(q->sb, sql_op(op));
@@ -447,7 +523,124 @@ static void scalar_cmp(Qc * q, int op, const Src * l, const Src * r) {
   gdefssql_sb_kw(q->sb, ")");
 }
 
+/* `(NOT owner.rid IN (SELECT a.ent FROM tN_cG a WHERE a.lang = ? AND a.vC IS
+ * NOT NULL))`: the field has no value in its scope's language. Two-valued:
+ * keys against keys. */
+static void field_none(Qc * q, const Src * f) {
+  char a[GDEFSSQL_NAME_CAP];
+  char t[GDEFSSQL_NAME_CAP];
+  next_alias(q, a);
+  gdefssql_sb_kw(q->sb, "(NOT ");
+  gdefssql_sb_col(q->sb, f->owner->e, "rid");
+  gdefssql_sb_kw(q->sb, " IN (SELECT ");
+  gdefssql_sb_col(q->sb, a, "ent");
+  gdefssql_sb_kw(q->sb, " FROM ");
+  gdefssql_name_table(t, f->owner->tno, GDEFSSQL_ROLE_CURRENT, f->grp);
+  gdefssql_sb_table(q->sb, t);
+  gdefssql_sb_kw(q->sb, " ");
+  gdefssql_sb_ident(q->sb, a);
+  gdefssql_sb_kw(q->sb, " WHERE ");
+  in_language(q, f->owner, a);
+  gdefssql_sb_kw(q->sb, " AND ");
+  field_col(q, a, f);
+  gdefssql_sb_kw(q->sb, " IS NOT NULL))");
+}
+
+/* The field has the empty text as a value of its own. */
+static void field_has_empty(Qc * q, const Src * f) {
+  Src e;
+  GDEFSTOR_Value v;
+  memset(&e, 0, sizeof e);
+  memset(&v, 0, sizeof v);
+  v.type = f->type;
+  v.bytes = (const uint8_t *)"";
+  e.kind = SRC_VALUES;
+  e.type = f->type;
+  e.values = &v;
+  e.nvalues = 1;
+  field_in(q, GDEFSTOR_QUERY_EQ, f, &e);
+}
+
+static int is_empty_text(const GDEFSTOR_Value * v) {
+  return (v->type == GDEFSTOR_FIELD_TEXT ||
+             v->type == GDEFSTOR_FIELD_REFERENCE) &&
+         v->len == 0;
+}
+
+static void compare_plain(Qc * q, int op, const Src * l, const Src * r);
+
+/*
+ * Equality where a side is a field flagged EMPTY_IF_NONE: that field's set is
+ * its values, or the single empty text when it has none. So some pair is
+ * equal when the plain sets have one, or when a flagged side has no value
+ * and the other side holds the empty text (has it as a value, or is a
+ * flagged field with none itself).
+ */
+static void compare_empty(Qc * q, const Src * l, const Src * r) {
+  const Src * sides[2];
+  const Src * others[2];
+  int k;
+  sides[0] = l;
+  others[0] = r;
+  sides[1] = r;
+  others[1] = l;
+  gdefssql_sb_kw(q->sb, "(");
+  compare_plain(q, GDEFSTOR_QUERY_EQ, l, r);
+  for (k = 0; k < 2; k++) {
+    const Src * f = sides[k];
+    const Src * o = others[k];
+    if (f->kind != SRC_FIELD || !f->empty) {
+      continue;
+    }
+    if (o->kind == SRC_VALUES) {
+      size_t i;
+      int has = 0;
+      for (i = 0; i < o->nvalues; i++) {
+        has |= is_empty_text(&o->values[i]);
+      }
+      if (!has) {
+        continue;
+      }
+      gdefssql_sb_kw(q->sb, " OR ");
+      field_none(q, f);
+    } else if (o->kind == SRC_SCALAR) {
+      gdefssql_sb_kw(q->sb, " OR (");
+      scalar(q, o);
+      gdefssql_sb_kw(q->sb, " IS NOT NULL AND ");
+      scalar(q, o);
+      gdefssql_sb_kw(q->sb, " = ");
+      empty_param(q);
+      gdefssql_sb_kw(q->sb, " AND ");
+      field_none(q, f);
+      gdefssql_sb_kw(q->sb, ")");
+    } else {
+      /* Another field: it holds the empty text, or (flagged too) has no
+       * value, which the first side reads as the empty text as well; that
+       * case is written once, from the first side. */
+      gdefssql_sb_kw(q->sb, " OR (");
+      field_none(q, f);
+      gdefssql_sb_kw(q->sb, " AND (");
+      field_has_empty(q, o);
+      if (o->empty && k == 0) {
+        gdefssql_sb_kw(q->sb, " OR ");
+        field_none(q, o);
+      }
+      gdefssql_sb_kw(q->sb, "))");
+    }
+  }
+  gdefssql_sb_kw(q->sb, ")");
+}
+
 static void compare(Qc * q, int op, const Src * l, const Src * r) {
+  if (op == GDEFSTOR_QUERY_EQ &&
+      ((l->kind == SRC_FIELD && l->empty) || (r->kind == SRC_FIELD && r->empty))) {
+    compare_empty(q, l, r);
+    return;
+  }
+  compare_plain(q, op, l, r);
+}
+
+static void compare_plain(Qc * q, int op, const Src * l, const Src * r) {
   if (l->kind == SRC_VALUES && r->kind == SRC_VALUES) {
     /* Two constant lists: decided here, with the port's order. */
     size_t a;
@@ -547,7 +740,7 @@ static void blind_in(Qc * q, const GDEFSTOR_QueryNode * n, const Scope * here,
   gdefssql_sb_kw(q->sb, " = ");
   gdefssql_sb_col(q->sb, a, "lang");
   gdefssql_sb_kw(q->sb, " WHERE ");
-  in_language(q, a);
+  in_language(q, here, a);
   gdefssql_sb_kw(q->sb, " AND ");
   gdefssql_sb_col(q->sb, a, "fld");
   gdefssql_sb_kw(q->sb, " = ");
@@ -574,7 +767,11 @@ static void exists(Qc * q, const GDEFSTOR_QueryNode * n, const Scope * here,
   const char * name = NULL;
   size_t name_len = 0;
   if (outer != NULL || n->child_count != 1 || n->children == NULL ||
-      n->children[0] == NULL || n->exists_type == NULL) {
+      n->children[0] == NULL || n->exists_type == NULL ||
+      (n->exists_language == NULL && n->exists_language_len != 0) ||
+      (n->exists_language != NULL &&
+          (n->exists_language_len == 0 ||
+              n->exists_language_len > GDEFSTOR_MODEL_MAX_LANGUAGE_BYTES))) {
     /* An EXISTS inside an EXISTS is outside the form. */
     refuse(q, GDEFSTOR_ERR_UNSUPPORTED);
     return;
@@ -592,6 +789,11 @@ static void exists(Qc * q, const GDEFSTOR_QueryNode * n, const Scope * here,
   memset(&inner, 0, sizeof inner);
   inner.type = q->plan->exists_types[q->exists_at];
   inner.tno = q->tnos[q->exists_at + 1];
+  /* The other type's fields read its own language when it names one; the
+   * outer entity's (OUTER operands) read the query's, through `here`. */
+  inner.lang = n->exists_language != NULL ? n->exists_language : here->lang;
+  inner.lang_len = n->exists_language != NULL ? n->exists_language_len
+                                              : here->lang_len;
   q->exists_at += 1;
   next_alias(q, inner.e);
   next_alias(q, inner.n);
@@ -701,27 +903,87 @@ static void node(Qc * q, const GDEFSTOR_QueryNode * n, const Scope * here,
 /* ---- the statements ------------------------------------------------------- */
 
 /* The sort key's expression; *nullable when it can be no value. */
+/* (SELECT c.v0 FROM tN_cG c WHERE c.ent = e.rid AND c.lang = ? AND c.v0 IS
+ * NOT NULL ORDER BY c.ord, c.item LIMIT ? OFFSET ?), bound 1 and 0: a root
+ * multiple's first value. */
+static void first_item(Qc * q, const Scope * main, const GDEFSTOR_FieldInfo * f) {
+  char a[GDEFSSQL_NAME_CAP];
+  char t[GDEFSSQL_NAME_CAP];
+  char col[GDEFSSQL_NAME_CAP];
+  next_alias(q, a);
+  gdefssql_name_column(col, 0, 0);
+  gdefssql_sb_kw(q->sb, "(SELECT ");
+  gdefssql_sb_col(q->sb, a, col);
+  gdefssql_sb_kw(q->sb, " FROM ");
+  gdefssql_name_table(t, main->tno, GDEFSSQL_ROLE_CURRENT, f->group);
+  gdefssql_sb_table(q->sb, t);
+  gdefssql_sb_kw(q->sb, " ");
+  gdefssql_sb_ident(q->sb, a);
+  gdefssql_sb_kw(q->sb, " WHERE ");
+  gdefssql_sb_col(q->sb, a, "ent");
+  gdefssql_sb_kw(q->sb, " = ");
+  gdefssql_sb_col(q->sb, main->e, "rid");
+  gdefssql_sb_kw(q->sb, " AND ");
+  in_language(q, main, a);
+  gdefssql_sb_kw(q->sb, " AND ");
+  gdefssql_sb_col(q->sb, a, col);
+  gdefssql_sb_kw(q->sb, " IS NOT NULL ORDER BY ");
+  gdefssql_sb_col(q->sb, a, "ord");
+  gdefssql_sb_kw(q->sb, ", ");
+  gdefssql_sb_col(q->sb, a, "item");
+  gdefssql_sb_kw(q->sb, " LIMIT ");
+  gdefssql_sb_int(q->sb, 1);
+  gdefssql_sb_kw(q->sb, " OFFSET ");
+  gdefssql_sb_int(q->sb, 0);
+  gdefssql_sb_kw(q->sb, ")");
+}
+
 static void sort_key(Qc * q, const GDEFSTOR_QuerySort * s, const Scope * main,
     int * nullable) {
   const GDEFSTOR_QueryOperand * o = &s->key;
+  int first = (o->flags & GDEFSTOR_QUERY_FIRST) != 0;
+  int empty = (o->flags & GDEFSTOR_QUERY_EMPTY_IF_NONE) != 0;
   *nullable = 0;
-  if (s->numeric != 0 || o->flags != 0) {
+  if (s->numeric != 0 ||
+      (o->flags & ~(GDEFSTOR_QUERY_FIRST | GDEFSTOR_QUERY_EMPTY_IF_NONE)) !=
+          0) {
     refuse(q, GDEFSTOR_ERR_UNSUPPORTED);
     return;
   }
   if (o->kind == GDEFSTOR_QUERY_FIELD) {
     GDEFSTOR_FieldInfo f;
     char col[GDEFSSQL_NAME_CAP];
-    /* One value per entity: a single field of the root group. */
+    /* One value per entity: a single field of the root group, or (FIRST) a
+     * multiple scalar one's first item. */
     if (!resolve_field(main->type, o->field, o->field_len, &f) ||
         f.parent != GDEFSTOR_TYPE_ROOT ||
-        (f.flags & GDEFSTOR_FIELD_MULTIPLE) != 0 || f.in_group != 0) {
+        ((f.flags & GDEFSTOR_FIELD_MULTIPLE) != 0) != first ||
+        (!first && f.in_group != 0) ||
+        (empty && f.type != GDEFSTOR_FIELD_TEXT &&
+            f.type != GDEFSTOR_FIELD_REFERENCE)) {
       refuse(q, GDEFSTOR_ERR_UNSUPPORTED);
       return;
     }
-    gdefssql_name_column(col, f.column, 0);
-    gdefssql_sb_col(q->sb, "a2", col);
-    *nullable = 1;
+    if (empty) {
+      /* No value sorts as the empty text, tied with it. */
+      gdefssql_sb_kw(q->sb, "COALESCE(");
+    }
+    if (first) {
+      first_item(q, main, &f);
+    } else {
+      gdefssql_name_column(col, f.column, 0);
+      gdefssql_sb_col(q->sb, "a2", col);
+    }
+    if (empty) {
+      gdefssql_sb_kw(q->sb, ", ");
+      empty_param(q);
+      gdefssql_sb_kw(q->sb, ")");
+    }
+    *nullable = !empty;
+    return;
+  }
+  if (o->flags != 0) {
+    refuse(q, GDEFSTOR_ERR_UNSUPPORTED);
     return;
   }
   if (o->kind == GDEFSTOR_QUERY_META || o->kind == GDEFSTOR_QUERY_ENTITY) {
@@ -740,7 +1002,8 @@ static void sort_key(Qc * q, const GDEFSTOR_QuerySort * s, const Scope * main,
 static int needs_root(const GDEFSTOR_Query * query) {
   size_t i;
   for (i = 0; i < query->sort_count; i++) {
-    if (query->sorts[i].key.kind == GDEFSTOR_QUERY_FIELD) {
+    if (query->sorts[i].key.kind == GDEFSTOR_QUERY_FIELD &&
+        (query->sorts[i].key.flags & GDEFSTOR_QUERY_FIRST) == 0) {
       return 1;
     }
   }
@@ -776,7 +1039,7 @@ static void statement(Qc * q, const Scope * main, int page) {
     /* In the ON, not the WHERE: an entity with no root in the language
      * stays, with no value to sort by. */
     gdefssql_sb_kw(q->sb, " AND ");
-    in_language(q, "a2");
+    in_language(q, main, "a2");
   }
   if (query->where != NULL) {
     gdefssql_sb_kw(q->sb, " WHERE ");
@@ -843,6 +1106,8 @@ GDEFSTOR_Result gdefssql_compile_plan(const GDEFSSQL_Dialect * d,
   memset(&main, 0, sizeof main);
   main.type = plan->type;
   main.tno = tnos[0];
+  main.lang = query->language;
+  main.lang_len = query->language_len;
   gdefssql_name_alias(main.e, 0);
   gdefssql_name_alias(main.n, 1);
   for (pass = 0; pass < (plan->count_only ? 1 : 2); pass++) {

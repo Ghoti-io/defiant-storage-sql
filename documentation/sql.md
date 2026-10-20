@@ -304,11 +304,19 @@ becomes, with entity alias `a0` and its newest state `a1`:
 | tiebreak | `a0.rid` ascending, last, always |
 | page | `LIMIT ? OFFSET ?`; "every match" is `INT64_MAX` |
 | total | `SELECT COUNT(*)` of the same predicate, no order, no page |
+| `REVISION_WHO` | `(SELECT NULLIF(r.who, ?) FROM tN_r r WHERE r.rid = a0.rid AND r.rev = a0.rev)`, bound `''`: the newest revision's author by the revision table's key, none for the system's; nullable, guarded as the creator is |
+| `= ` with an `EMPTY_IF_NONE` field | the plain form, `OR` the field has no value (`(NOT owner.rid IN (SELECT c.ent FROM tN_cG c WHERE c.lang = ? AND c.vC IS NOT NULL))`) while the other side holds the empty text: a constant `''`, a scalar equal to `''`, or another field holding `''` or, flagged too, holding nothing |
+| `AS_TEXT` | nothing: a reference column is text already; only the type check changes |
+| sort key `FIRST` | `(SELECT c.v0 FROM tN_cG c WHERE c.ent = a0.rid AND c.lang = ? AND c.v0 IS NOT NULL ORDER BY c.ord, c.item LIMIT ? OFFSET ?)`, bound 1 and 0 |
+| sort key `EMPTY_IF_NONE` | `COALESCE(key, ?)`, bound `''`, so no value ties with the empty text |
 
 Every `?` written `lang = ?` above is the query's one language
 (`GDEFSTOR_Query::language`): a field, inside an EXISTS too, reads that
 language's current items and no other's, so an entity with no tree in it has
-no item to match and sorts as no value.
+no item to match and sorts as no value. The one exception is an EXISTS that
+names its own language (`GDEFSTOR_QueryNode::exists_language`, story S6b):
+its type's fields bind that language, and its OUTER operands still the
+query's.
 
 Every comparison is TRUE or FALSE, never UNKNOWN, which is what makes SQL's
 `NOT` the port's `not`: an `IN` whose left side is a key and whose subquery
@@ -319,7 +327,8 @@ absent value adds nothing to the port's set.
 Refused with `GDEFSSQL_ERR_UNSUPPORTED` (through the backend,
 `GDEFSTOR_ERR_UNSUPPORTED`): COLUMN and CONST operands, a select, a numeric
 sort or tiebreak, more than four sort keys, a sort on anything but a single
-field of the root group, a fact or the public id, a personal (outside BLIND),
+field of the root group (or, with `FIRST`, a multiple scalar one), a fact or
+the public id, a personal (outside BLIND),
 retired or group field, an EXISTS inside an EXISTS, an OUTER operand outside one, an unknown
 node, operand, fact or flag, and two sides of different types or decimal
 scales. A statement with more parameters than the dialect allows is

@@ -327,7 +327,7 @@ plant rebuild-clears-records src/backend.c testConformance \
 plant language-other-read src/compile.c testConformance \
   'ModelLanguage.AQueryReadsOnlyItsLanguage ModelLanguageSweep.SeededHistoriesAgreeWithAModel' \
   '  gdefssql_sb_kw(q->sb, " WHERE ");
-  in_language(q, a);
+  in_language(q, f->owner, a);
   gdefssql_sb_kw(q->sb, " AND ");
   if (l->kind == SRC_VALUES || r->kind == SRC_VALUES) {' \
   '  gdefssql_sb_kw(q->sb, " WHERE ");
@@ -338,7 +338,46 @@ plant language-other-read src/compile.c testConformance \
 plant language-other-sort src/compile.c testConformance \
   'ModelLanguage.AQueryReadsOnlyItsLanguage ModelLanguage.AnEntityWithNoTreeInTheLanguageMatchesNoField' \
   '    gdefssql_sb_kw(q->sb, " AND ");
-    in_language(q, "a2");' \
+    in_language(q, main, "a2");' \
   ''
+
+plant_control testConformance 'ModelQuery.*'
+
+# An EXISTS that names its own language read in the query's: a relation kept
+# in one language, tested from a list in another, finds no row (story S6b).
+plant exists-language-ignored src/compile.c testConformance \
+  'ModelQuery.AnExistsReadsTheLanguageItNames' \
+  '  inner.lang = n->exists_language != NULL ? n->exists_language : here->lang;' \
+  '  inner.lang = here->lang;'
+
+# A field flagged EMPTY_IF_NONE compared as if unflagged: no value is no
+# value, never the empty text.
+plant empty-if-none-dropped src/compile.c testConformance \
+  'ModelQuery.EmptyIfNoneReadsNoValueAsTheEmptyText' \
+  '  if (op == GDEFSTOR_QUERY_EQ &&
+      ((l->kind == SRC_FIELD && l->empty) || (r->kind == SRC_FIELD && r->empty))) {' \
+  '  if (0) {'
+
+# A root multiple's first item taken by item id, not by order key, so moving
+# an item does not change which is first.
+plant first-by-item-id src/compile.c testConformance \
+  'ModelQuery.FirstSortsAMultipleByItsFirstItem' \
+  '  gdefssql_sb_kw(q->sb, " IS NOT NULL ORDER BY ");
+  gdefssql_sb_col(q->sb, a, "ord");
+  gdefssql_sb_kw(q->sb, ", ");
+  gdefssql_sb_col(q->sb, a, "item");' \
+  '  gdefssql_sb_kw(q->sb, " IS NOT NULL ORDER BY ");
+  gdefssql_sb_col(q->sb, a, "item");'
+
+# The newest revision's author read from the entity's creator.
+plant revision-who-is-the-creator src/compile.c testConformance \
+  'ModelQuery.RevisionWhoIsTheNewestRevisionsAuthor' \
+  '    case GDEFSTOR_META_REVISION_WHO:
+      out->who = s;
+      out->type = GDEFSTOR_FIELD_REFERENCE;' \
+  '    case GDEFSTOR_META_REVISION_WHO:
+      out->alias = s->e;
+      out->column = "creator";
+      out->type = GDEFSTOR_FIELD_REFERENCE;'
 
 plant_finish
