@@ -86,24 +86,24 @@ TEST_F(Schema, ANestedDeclarationYieldsTheDocumentedTables) {
   const char * const want[] = {
       "CREATE TABLE IF NOT EXISTS \"t2_e\" (\"rid\" INTEGER NOT NULL, \"pid\" TEXT NOT NULL, \"creator\" TEXT, \"created\" INTEGER NOT NULL, \"rev\" INTEGER NOT NULL, \"last_item\" INTEGER NOT NULL, PRIMARY KEY (\"rid\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_s\" (\"rid\" INTEGER NOT NULL, \"seq\" INTEGER NOT NULL, \"pub\" INTEGER NOT NULL, \"del\" INTEGER NOT NULL, \"actor\" TEXT NOT NULL, \"at\" INTEGER NOT NULL, PRIMARY KEY (\"rid\", \"seq\"))",
-      "CREATE TABLE IF NOT EXISTS \"t2_r\" (\"rid\" INTEGER NOT NULL, \"rev\" INTEGER NOT NULL, \"cseq\" INTEGER NOT NULL, \"who\" TEXT NOT NULL, \"at\" INTEGER NOT NULL, \"why\" TEXT NOT NULL, PRIMARY KEY (\"rid\", \"rev\"))",
+      "CREATE TABLE IF NOT EXISTS \"t2_r\" (\"rid\" INTEGER NOT NULL, \"rev\" INTEGER NOT NULL, \"cseq\" INTEGER NOT NULL, \"who\" TEXT NOT NULL, \"at\" INTEGER NOT NULL, \"why\" TEXT NOT NULL, \"langs\" TEXT NOT NULL, PRIMARY KEY (\"rid\", \"rev\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_n\" (\"rid\" INTEGER NOT NULL, \"pub\" INTEGER NOT NULL, \"del\" INTEGER NOT NULL, PRIMARY KEY (\"rid\"))",
-      "CREATE TABLE IF NOT EXISTS \"t2_g0\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" INTEGER, \"v3\" TEXT, \"v4\" BLOB, \"v4s\" TEXT, PRIMARY KEY (\"ent\", \"item\", \"vfrom\"))",
-      "CREATE TABLE IF NOT EXISTS \"t2_c0\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" INTEGER, \"v3\" TEXT, \"v4\" BLOB, \"v4s\" TEXT, PRIMARY KEY (\"ent\", \"item\"))",
-      "CREATE TABLE IF NOT EXISTS \"t2_g1\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, PRIMARY KEY (\"ent\", \"item\", \"vfrom\"))",
-      "CREATE TABLE IF NOT EXISTS \"t2_c1\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, PRIMARY KEY (\"ent\", \"item\"))",
-      "CREATE TABLE IF NOT EXISTS \"t2_g2\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" REAL, PRIMARY KEY (\"ent\", \"item\", \"vfrom\"))",
-      "CREATE TABLE IF NOT EXISTS \"t2_c2\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" REAL, PRIMARY KEY (\"ent\", \"item\"))",
-      "CREATE TABLE IF NOT EXISTS \"t2_g3\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" INTEGER, \"v1\" TEXT, PRIMARY KEY (\"ent\", \"item\", \"vfrom\"))",
-      "CREATE TABLE IF NOT EXISTS \"t2_c3\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" INTEGER, \"v1\" TEXT, PRIMARY KEY (\"ent\", \"item\"))",
+      "CREATE TABLE IF NOT EXISTS \"t2_g0\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" INTEGER, \"v3\" TEXT, \"v4\" BLOB, \"v4s\" TEXT, PRIMARY KEY (\"ent\", \"lang\", \"item\", \"vfrom\"))",
+      "CREATE TABLE IF NOT EXISTS \"t2_c0\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" INTEGER, \"v3\" TEXT, \"v4\" BLOB, \"v4s\" TEXT, PRIMARY KEY (\"ent\", \"lang\", \"item\"))",
+      "CREATE TABLE IF NOT EXISTS \"t2_g1\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, PRIMARY KEY (\"ent\", \"lang\", \"item\", \"vfrom\"))",
+      "CREATE TABLE IF NOT EXISTS \"t2_c1\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, PRIMARY KEY (\"ent\", \"lang\", \"item\"))",
+      "CREATE TABLE IF NOT EXISTS \"t2_g2\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" REAL, PRIMARY KEY (\"ent\", \"lang\", \"item\", \"vfrom\"))",
+      "CREATE TABLE IF NOT EXISTS \"t2_c2\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" REAL, PRIMARY KEY (\"ent\", \"lang\", \"item\"))",
+      "CREATE TABLE IF NOT EXISTS \"t2_g3\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" INTEGER, \"v1\" TEXT, PRIMARY KEY (\"ent\", \"lang\", \"item\", \"vfrom\"))",
+      "CREATE TABLE IF NOT EXISTS \"t2_c3\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" INTEGER, \"v1\" TEXT, PRIMARY KEY (\"ent\", \"lang\", \"item\"))",
       /* email is personal: the blind table, and its two indexes below. */
-      "CREATE TABLE IF NOT EXISTS \"t2_b\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"fld\" INTEGER NOT NULL, \"subject\" TEXT NOT NULL, \"mac\" BLOB NOT NULL, \"kid\" INTEGER NOT NULL, \"norm\" INTEGER NOT NULL, PRIMARY KEY (\"ent\", \"item\", \"vfrom\", \"fld\"))",
-      "CREATE INDEX IF NOT EXISTS \"t2_i0_0\" ON \"t2_c0\" (\"v0\", \"ent\")",
+      "CREATE TABLE IF NOT EXISTS \"t2_b\" (\"ent\" INTEGER NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"fld\" INTEGER NOT NULL, \"subject\" TEXT NOT NULL, \"mac\" BLOB NOT NULL, \"kid\" INTEGER NOT NULL, \"norm\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, PRIMARY KEY (\"ent\", \"item\", \"vfrom\", \"fld\"))",
+      "CREATE INDEX IF NOT EXISTS \"t2_i0_0\" ON \"t2_c0\" (\"v0\", \"lang\", \"ent\")",
       "CREATE UNIQUE INDEX IF NOT EXISTS \"t2p\" ON \"t2_e\" (\"pid\")",
       "CREATE INDEX IF NOT EXISTS \"t2_bm\" ON \"t2_b\" (\"fld\", \"mac\")",
       "CREATE INDEX IF NOT EXISTS \"t2_bs\" ON \"t2_b\" (\"subject\")",
       "CREATE INDEX IF NOT EXISTS \"t2_j0_4\" ON \"t2_g0\" (\"v4s\")",
-      "CREATE INDEX IF NOT EXISTS \"t2_i2_0\" ON \"t2_c2\" (\"v0\", \"ent\")",
+      "CREATE INDEX IF NOT EXISTS \"t2_i2_0\" ON \"t2_c2\" (\"v0\", \"lang\", \"ent\")",
   };
   std::vector<std::string> expect(std::begin(want), std::end(want));
   EXPECT_EQ(expect, ddl);
@@ -162,7 +162,7 @@ TEST_F(Schema, AddingAFieldIsOneAddColumnStep) {
   ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.order", v3));
   want = {"ALTER TABLE \"t1_g3\" ADD COLUMN \"v2\" TEXT",
       "ALTER TABLE \"t1_c3\" ADD COLUMN \"v2\" TEXT",
-      "CREATE INDEX IF NOT EXISTS \"t1_i3_2\" ON \"t1_c3\" (\"v2\", \"ent\")"};
+      "CREATE INDEX IF NOT EXISTS \"t1_i3_2\" ON \"t1_c3\" (\"v2\", \"lang\", \"ent\")"};
   EXPECT_EQ(want, DdlSince(*rig.engine, from));
   /* Retiring a field and indexing another that was not runs only the index:
    * the retired field's column stays. */
@@ -171,7 +171,7 @@ TEST_F(Schema, AddingAFieldIsOneAddColumnStep) {
   v4[1].flags |= IDX;
   from = Mark();
   ASSERT_EQ(GDEFSTOR_OK, Declare(rig.store, "shop.order", v4));
-  want = {"CREATE INDEX IF NOT EXISTS \"t1_i0_2\" ON \"t1_c0\" (\"v2\", \"ent\")"};
+  want = {"CREATE INDEX IF NOT EXISTS \"t1_i0_2\" ON \"t1_c0\" (\"v2\", \"lang\", \"ent\")"};
   EXPECT_EQ(want, DdlSince(*rig.engine, from));
   /* Unindexing writes nothing: an index is never dropped. */
   std::vector<F> v5 = v4;
@@ -330,6 +330,8 @@ TEST_F(Schema, HostileNamesNeverReachSqlText) {
   GDEFSTOR_Query q;
   std::memset(&q, 0, sizeof q);
   q.size = sizeof q;
+  q.language = "en";
+  q.language_len = 2;
   q.where = &all;
   q.sorts = &sort;
   q.sort_count = 1;
@@ -370,8 +372,10 @@ TEST_F(Schema, AColumnLimitIsRefusedBeforeAnyStep) {
   GDEFSSQL_Dialect d = sqlstub::StdDialect();
   d.max_columns = 16;
   Open(d);
+  /* Seven fixed columns of a group table (ent, lang, item, vfrom, vto,
+   * parent, ord) and ten values is 17, one past the limit. */
   std::vector<F> wide;
-  for (int i = 0; i < 11; i++) {
+  for (int i = 0; i < 10; i++) {
     wide.push_back(Field("c" + std::to_string(i), I));
   }
   size_t from = Mark();
@@ -488,6 +492,8 @@ class Index : public Fixture {
     GDEFSTOR_Query q;
     std::memset(&q, 0, sizeof q);
     q.size = sizeof q;
+    q.language = "en";
+    q.language_len = 2;
     q.where = &leaf;
     q.limit = 100;
     std::vector<std::string> ids;

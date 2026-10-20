@@ -52,6 +52,8 @@ struct Seen {
   int nots = 0;
   int field_field = 0;
   int outer = 0;
+  int other_language = 0; /* answered in "fr", with rows */
+  int no_tree = 0;        /* asked in "de", which no entity has a tree in */
 };
 
 void Sweep(const GDEFSSQL_Dialect & d, bool qualified, uint32_t seed,
@@ -76,7 +78,7 @@ void Sweep(const GDEFSSQL_Dialect & d, bool qualified, uint32_t seed,
                                << gdefstor_result_string(rc);
     uint64_t count = 0;
     ASSERT_EQ(GDEFSTOR_OK, gdefstor_entity_count(rig.store, kTenant, 2, type,
-        std::strlen(type), b.q.where, &count));
+        std::strlen(type), b.q.language, b.q.language_len, b.q.where, &count));
     EXPECT_EQ(total, count) << "seed " << seed << " query " << n;
     seen.queries++;
     seen.counts++;
@@ -92,6 +94,8 @@ void Sweep(const GDEFSSQL_Dialect & d, bool qualified, uint32_t seed,
     seen.nots += b.nots;
     seen.field_field += b.field_field;
     seen.outer += b.outer;
+    seen.other_language += !ids.empty() && b.q.language[0] == 'f';
+    seen.no_tree += b.q.language[0] == 'd';
   }
   EXPECT_EQ(0, rig.tee.disagreements) << rig.tee.first_disagreement;
   EXPECT_EQ(0, rig.tee.refusals);
@@ -112,6 +116,8 @@ void Check(const Seen & s) {
   EXPECT_GT(s.nots, 100);
   EXPECT_GT(s.field_field, 20);
   EXPECT_GT(s.outer, 30);
+  EXPECT_GT(s.other_language, 100);
+  EXPECT_GT(s.no_tree, 100);
 }
 
 TEST(Agreement, RandomQueriesMatchTheReferenceScan) {

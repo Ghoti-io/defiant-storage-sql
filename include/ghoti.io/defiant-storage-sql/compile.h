@@ -35,9 +35,12 @@
  * answers:
  *
  * - a FIELD operand is the set of that field's values on the entity's current
- *   items: `e.row IN (SELECT c.entity FROM tN_cG c WHERE c.vC op ...)`, so a
- *   field inside a multiple or a group holds when some item matches; a
- *   comparison of two FIELD operands is an `EXISTS` over both item sets;
+ *   items in the query's language: `e.row IN (SELECT c.entity FROM tN_cG c
+ *   WHERE c.lang = ? AND c.vC op ...)`, so a field inside a multiple or a
+ *   group holds when some item matches, and no other language's item is
+ *   read; a comparison of two FIELD operands is an `EXISTS` over both item
+ *   sets, each in the language, and a sort's join to the root group names
+ *   the language in its `ON`;
  * - VALUES are bound parameters, a comparison against several is the `OR` of
  *   one per value, and a comparison of two VALUES lists is decided here;
  * - META and ENTITY are columns of `tN_e` and `tN_n`; a creator that is the

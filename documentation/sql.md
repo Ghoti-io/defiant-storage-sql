@@ -1,9 +1,9 @@
 # The SQL layer
 
 **Status:** describes what shipped in story S2 (2026-10-18), with the key
-store and `gdefssql_store_version()` added in story S3, and index builds
+store and `gdefssql_store_version()` added in story S3, index builds
 outside the step, schemas made per tenant and `gdefssql_store_exists()` in
-story S4.
+story S4, and the language axis (layout version 2) in story S6a2.
 
 This is the contract between `defiant-storage-sql` and the engine backends
 that sit on it. The port's meaning is `defiant-storage`'s
@@ -24,12 +24,12 @@ No identifier is built from caller text. Every identifier is one of:
 | `tN_e`, `tN_s`, `tN_r`, `tN_n` | type N's entity, state, revision and newest-state tables |
 | `tN_gG`, `tN_cG` | type N's item versions and current items of group G |
 | `tNp` | unique index on `tN_e (pid)` |
-| `tN_iG_C` | index on `tN_cG (vC, ent)` for an indexed field |
+| `tN_iG_C` | index on `tN_cG (vC, lang, ent)` for an indexed field |
 | `tN_jG_C` | index on `tN_gG (vCs)`, the subject of a personal field |
 | `tN_b` | type N's blind table (AD-14), for a type with a personal field |
 | `tN_bm`, `tN_bs` | indexes on `tN_b (fld, mac)` and `tN_b (subject)` |
 | `vC`, `vCs` | column C of a group, and its subject column |
-| fixed column names | `rid pid creator created rev last_item seq pub del actor at cseq who why ent item vfrom vto parent ord id version last_row last_type last_cseq name tno decl grp col role kind type base body fld subject mac kid norm ns rkey last kept stream fmt lease fails parked` |
+| fixed column names | `rid pid creator created rev last_item seq pub del actor at cseq who why langs ent lang item vfrom vto parent ord id version last_row last_type last_cseq name tno decl grp col role kind type base body fld subject mac kid norm ns rkey last kept stream fmt lease fails parked` |
 | `aK` | a table alias in one statement |
 | `dsk_schema`, `dsk_counter`, `dsk_key`, `dsk_ledger`, `dsk_sealed`, `dsk_secret`, `dsk_ledger_seq` | the key store's tables and index (section 8), never in a data store |
 | `subject secret last_seq` | the key store's column names |
@@ -60,7 +60,7 @@ Per tenant:
 
 | Table | Columns | Key |
 | --- | --- | --- |
-| `dss_schema` | `id`, `version` (1) | `id` |
+| `dss_schema` | `id`, `version` (2) | `id` |
 | `dss_counter` | `id`, `last_row`, `last_type`, `last_cseq` | `id` |
 | `dss_type` | `name` TEXT, `tno`, `decl` BYTES (the port's declaration text) | `name` |
 | `dss_name` | as above | `tno, grp, col, role` |
@@ -83,8 +83,8 @@ Per type N, truth:
 | --- | --- | --- |
 | `tN_e` | `rid`, `pid`, `creator` (NULL for the system), `created`, `rev` (highest), `last_item` | `rid` |
 | `tN_s` | `rid`, `seq`, `pub`, `del`, `actor`, `at` | `rid, seq` |
-| `tN_r` | `rid`, `rev`, `cseq`, `who`, `at`, `why` | `rid, rev` |
-| `tN_gG` | `ent`, `item`, `vfrom`, `vto` (NULL while open), `parent`, `ord`, `vC`... | `ent, item, vfrom` |
+| `tN_r` | `rid`, `rev`, `cseq`, `who`, `at`, `why`, `langs` (the languages it changed, `de,fr`) | `rid, rev` |
+| `tN_gG` | `ent`, `lang`, `item`, `vfrom`, `vto` (NULL while open), `parent`, `ord`, `vC`... | `ent, lang, item, vfrom` |
 
 and derived, written in the same transaction and rebuilt from the truth by
 `rebuild`:
@@ -92,17 +92,33 @@ and derived, written in the same transaction and rebuilt from the truth by
 | Table | Columns | Key |
 | --- | --- | --- |
 | `tN_n` | `rid`, `pub`, `del`: the newest state | `rid` |
-| `tN_cG` | `ent`, `item`, `vfrom`, `parent`, `ord`, `vC`...: the open versions | `ent, item` |
+| `tN_cG` | `ent`, `lang`, `item`, `vfrom`, `parent`, `ord`, `vC`...: the open versions | `ent, lang, item` |
 
 and, for a type with a personal field (retired ones included), the blind
 table, which is truth while its subject exists and is not rebuilt:
 
 | Table | Columns | Key |
 | --- | --- | --- |
-| `tN_b` | `ent`, `item`, `vfrom` (the version it indexes), `fld` (the field's id), `subject` REFERENCE, `mac` BYTES (32), `kid`, `norm` | `ent, item, vfrom, fld` |
+| `tN_b` | `ent`, `item`, `vfrom` (the version it indexes), `fld` (the field's id), `subject` REFERENCE, `mac` BYTES (32), `kid`, `norm`, `lang` | `ent, item, vfrom, fld` |
 
 A MAC is in this table and in no other: never a column of `tN_gG`, `tN_cG` or
 `tN_r`.
+
+**Languages (story S6a2).** Every item version, current item and blind row
+holds the language of its tree in `lang` (TEXT, with the dialect's
+collation, so tags compare by bytes), and every revision row the languages
+it changed in `langs`. The language is a column, never a table or a column
+per language, so nothing here limits how many a tenant uses. The group and
+current keys lead with `ent, lang`, so one language's items of an entity are
+read by the key without the others'; item ids are the entity's across its
+languages, so `item` still names one item. A field's index is
+`(vC, lang, ent)`: an equality (or `in`) in one language seeks the value and
+the language together and reads only that language's entries; a range reads
+the entries in the range of every language that has them. The value leads
+rather than the language because an index that began with the language
+offers the sort's join (`ent = ? AND lang = ?`) a covering search on the
+language alone, which SQLite prefers to the key, reading a whole language
+for each entity sorted.
 
 Group 0 is the root group; a multiple scalar field is a one-column group whose
 column is 0. A personal field's value column holds the ciphertext (BYTES) and
@@ -136,10 +152,13 @@ declaration that would exceed the dialect's column limit is
 backend's life creates the six tenant tables in a transaction of its own, then
 checks `dss_schema.version`: another version is refused
 (`GDEFSTOR_ERR_UNSUPPORTED` for a newer one, `GDEFSTOR_ERR_FORMAT` otherwise).
+The version is 2 since the language axis: a store of layout 1 has group,
+current, revision and blind tables without their language columns, and is
+refused as older. Nothing is migrated, because nothing was released.
 The four tables of story S6a are made in the same transaction and recorded
 (role 16) when their records are missing, so a store made before them gains
 them at its first write in a backend's life; a read of such a store before
-that write finds no table (the engine's error). The layout version stays 1.
+that write finds no table (the engine's error).
 
 The steps of a declaration run inside the write that declares it, so a dialect
 must have transactional DDL (SQLite and Postgres do). A dialect without it is
@@ -181,8 +200,7 @@ personal field: the table in the declaring write, recorded (role 13), and its
 two indexes recorded pending (roles 14 and 15) and built after it, like every
 other. A type declared before the blind table existed gets it when its
 declaration next changes; until then a save with a MAC on it is
-`GDEFSTOR_ERR_UNSUPPORTED`. The layout version stays 1: the table is an
-additive step.
+`GDEFSTOR_ERR_UNSUPPORTED`. The table is an additive step.
 
 The key store (section 8) is a port of its own: its one index,
 `dsk_ledger_seq`, is made with its table in the key store's first
@@ -219,9 +237,10 @@ SELECT COUNT(*) FROM ...
 | `entity_find` | `dss_entity` by `pid`, then `tN_e JOIN tN_n` by `rid` |
 | `entity_insert` | the row counter; `tN_e`, `tN_n`, `dss_entity` rows |
 | `state_append` | the last `seq`; a `tN_s` row; `tN_n` updated |
-| `apply` | the commit sequence (once per write); for each close, the open version is read (it must be open), `vto` set, the current row deleted; each new version inserted into `tN_gG` and `tN_cG`; each blind row into `tN_b`; the `tN_r` row; `tN_e.rev` and `last_item` |
+| `apply` | the commit sequence (once per write); for each close, the open version is read by `ent, lang, item, vfrom` (it must be open), `vto` set, the current row deleted; each new version inserted into `tN_gG` and `tN_cG`; each blind row into `tN_b`; the `tN_r` row with its languages; `tN_e.rev` and `last_item` |
 | `history` | `tN_r` and `tN_s` by `rid` |
-| `items` | each `tN_cG` by `ent`, or each `tN_gG` by `ent` and `vfrom <= ? AND (vto IS NULL OR vto > ?)`; when the port asks, `tN_b` by `ent` |
+| `items` | each `tN_cG` by `ent` (and `lang` for one language), or each `tN_gG` by `ent` (and `lang`) and `vfrom <= ? AND (vto IS NULL OR vto > ?)`; when the port asks, `tN_b` by `ent` (and `lang`) |
+| `languages` | `SELECT lang FROM tN_c0 WHERE ent = ?`, or `tN_g0` with the as-of bounds: one root item per language |
 | `blind_history` | `SELECT ... FROM tN_b a0 JOIN tN_e a1 ON a1.rid = a0.ent JOIN tN_gG a2 ON a2.ent = a0.ent AND a2.item = a0.item AND a2.vfrom = a0.vfrom WHERE a0.fld = ? AND a0.mac = ?`, by `tN_bm` |
 | `subject_lookup` | `dss_name` by role 8 (every subject column), then for each `SELECT ... FROM tN_gG a0 JOIN tN_e a1 ON a1.rid = a0.ent WHERE a0.vCs = ?`, by `tN_jG_C`; never `tN_b` |
 | `blind_delete` | `dss_name` by role 13 (every blind table), then for each `DELETE FROM tN_b WHERE subject = ?`, by `tN_bs` |
@@ -268,20 +287,25 @@ becomes, with entity alias `a0` and its newest state `a1`:
 
 | Port | SQL |
 | --- | --- |
-| FIELD op VALUES | `a0.rid IN (SELECT c.ent FROM tN_cG c WHERE c.vC op ? OR ...)`, or `c.vC IN (?, ...)` for equality against several |
+| FIELD op VALUES | `a0.rid IN (SELECT c.ent FROM tN_cG c WHERE c.lang = ? AND (c.vC op ? OR ...))`, or `c.vC IN (?, ...)` for equality against several |
 | FIELD op META/ENTITY | the same, with the scalar column in place of `?` |
-| FIELD op FIELD | `EXISTS (SELECT NULL FROM tN_cG x JOIN tM_cH y ON y.ent = owner.rid WHERE x.ent = owner.rid AND x.vC op y.vD)` |
+| FIELD op FIELD | `EXISTS (SELECT NULL FROM tN_cG x JOIN tM_cH y ON y.ent = owner.rid AND y.lang = ? WHERE x.ent = owner.rid AND x.lang = ? AND x.vC op y.vD)` |
 | META/ENTITY op VALUES | `(col op ? OR ...)`, guarded by `col IS NOT NULL` for the creator |
 | VALUES op VALUES | decided by the compiler: `(NULL IS NULL)` or `(NULL IS NOT NULL)` |
 | `!=` | `(NOT (... = ...))`: no pair is equal |
 | `in` | `=` against the list; an empty list is false |
 | and, or, not | `(... AND ...)`, `(... OR ...)`, `(NOT ...)`; an empty and is true, an empty or false |
 | EXISTS T | `EXISTS (SELECT NULL FROM tM_e x JOIN tM_n y ON y.rid = x.rid WHERE ...)`; OUTER operands name `a0` |
-| BLIND (personal FIELD, MAC) | `owner.rid IN (SELECT b.ent FROM tN_b b JOIN tN_cG c ON c.ent = b.ent AND c.item = b.item AND c.vfrom = b.vfrom WHERE b.fld = ? AND b.mac = ?)`: the join on `vfrom` keeps an older version's MAC from matching |
-| sort key | a root field through `LEFT JOIN tN_c0 a2 ON a2.ent = a0.rid`, or a fact; `DESC`; `NULLS FIRST`/`LAST` where the engine differs |
+| BLIND (personal FIELD, MAC) | `owner.rid IN (SELECT b.ent FROM tN_b b JOIN tN_cG c ON c.ent = b.ent AND c.item = b.item AND c.vfrom = b.vfrom AND c.lang = b.lang WHERE b.lang = ? AND b.fld = ? AND b.mac = ?)`: the join on `vfrom` keeps an older version's MAC from matching |
+| sort key | a root field through `LEFT JOIN tN_c0 a2 ON a2.ent = a0.rid AND a2.lang = ?` (in the `ON`, so an entity with no tree in the language stays, with no value), or a fact; `DESC`; `NULLS FIRST`/`LAST` where the engine differs |
 | tiebreak | `a0.rid` ascending, last, always |
 | page | `LIMIT ? OFFSET ?`; "every match" is `INT64_MAX` |
 | total | `SELECT COUNT(*)` of the same predicate, no order, no page |
+
+Every `?` written `lang = ?` above is the query's one language
+(`GDEFSTOR_Query::language`): a field, inside an EXISTS too, reads that
+language's current items and no other's, so an entity with no tree in it has
+no item to match and sorts as no value.
 
 Every comparison is TRUE or FALSE, never UNKNOWN, which is what makes SQL's
 `NOT` the port's `not`: an `IN` whose left side is a key and whose subquery
@@ -343,9 +367,11 @@ What S3 (SQLite) and S4 (Postgres) supply, and what they must know:
   `dss_entity`) and catalog (`dss_name`) on every call; nothing is cached
   across calls, so nothing goes stale when another process declares a type.
   S3's rows-scanned assertions should count these.
-- **Indexes.** A field filter is written as `a0.rid IN (SELECT c.ent ...)` so
-  that an engine can drive it from `tN_iG_C (vC, ent)`; a sort on a root
-  field uses `tN_c0`; nothing relies on a partial index.
+- **Indexes.** A field filter is written as `a0.rid IN (SELECT c.ent ...
+  WHERE c.lang = ? AND ...)` so that an engine can drive it from
+  `tN_iG_C (vC, lang, ent)`, an equality reading only the query's language;
+  a sort on a root field uses `tN_c0` by its key `(ent, lang, ...)`; nothing
+  relies on a partial index.
 - **Refusing a store it must not serve.** The backends check
   `dss_schema.version` on the first write of a tenant, never on a read. An
   executor that can see from the engine's catalog that the version table

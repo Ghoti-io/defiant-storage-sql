@@ -35,6 +35,11 @@
  *   so `NOT` is the port's `not`. An `IN (subquery)` whose left side is a
  *   key and whose subquery selects keys cannot be UNKNOWN; neither can
  *   `EXISTS`; a nullable column is guarded with `IS NOT NULL`.
+ *
+ * And one rule of scope: **one language.** Every read of a current table, in
+ * a predicate, an EXISTS or the sort's join, names the query's language
+ * (`c.lang = ?`), so a field reads that language's items and no other's, and
+ * an entity with no tree in it has no item to match and sorts as no value.
  */
 
 #include <ghoti.io/defiant-storage-sql/macros.h>
@@ -291,6 +296,19 @@ static void value_param(Qc * q, const GDEFSTOR_Value * v) {
   gdefssql_sb_param(q->sb, &d);
 }
 
+/* `alias.lang = ?`, the query's language: what scopes every current-table
+ * read to one language's items. */
+static void in_language(Qc * q, const char * alias) {
+  GDEFSSQL_Datum d;
+  memset(&d, 0, sizeof d);
+  d.kind = GDEFSSQL_DATUM_TEXT;
+  d.bytes = (const uint8_t *)q->plan->query->language;
+  d.len = q->plan->query->language_len;
+  gdefssql_sb_col(q->sb, alias, "lang");
+  gdefssql_sb_kw(q->sb, " = ");
+  gdefssql_sb_param(q->sb, &d);
+}
+
 /* The column of a FIELD source, under alias @p alias. */
 static void field_col(Qc * q, const char * alias, const Src * f) {
   char col[GDEFSSQL_NAME_CAP];
@@ -358,6 +376,8 @@ static void field_in(Qc * q, int op, const Src * l, const Src * r) {
   gdefssql_sb_kw(q->sb, " ");
   gdefssql_sb_ident(q->sb, a);
   gdefssql_sb_kw(q->sb, " WHERE ");
+  in_language(q, a);
+  gdefssql_sb_kw(q->sb, " AND ");
   if (l->kind == SRC_VALUES || r->kind == SRC_VALUES) {
     against_values(q, op, l, r, a);
   } else {
@@ -391,10 +411,14 @@ static void field_field(Qc * q, int op, const Src * l, const Src * r) {
   gdefssql_sb_col(q->sb, b, "ent");
   gdefssql_sb_kw(q->sb, " = ");
   gdefssql_sb_col(q->sb, r->owner->e, "rid");
+  gdefssql_sb_kw(q->sb, " AND ");
+  in_language(q, b);
   gdefssql_sb_kw(q->sb, " WHERE ");
   gdefssql_sb_col(q->sb, a, "ent");
   gdefssql_sb_kw(q->sb, " = ");
   gdefssql_sb_col(q->sb, l->owner->e, "rid");
+  gdefssql_sb_kw(q->sb, " AND ");
+  in_language(q, a);
   gdefssql_sb_kw(q->sb, " AND ");
   field_col(q, a, l);
   gdefssql_sb_kw(q->sb, sql_op(op));
@@ -518,7 +542,13 @@ static void blind_in(Qc * q, const GDEFSTOR_QueryNode * n, const Scope * here,
   gdefssql_sb_col(q->sb, c, "vfrom");
   gdefssql_sb_kw(q->sb, " = ");
   gdefssql_sb_col(q->sb, a, "vfrom");
+  gdefssql_sb_kw(q->sb, " AND ");
+  gdefssql_sb_col(q->sb, c, "lang");
+  gdefssql_sb_kw(q->sb, " = ");
+  gdefssql_sb_col(q->sb, a, "lang");
   gdefssql_sb_kw(q->sb, " WHERE ");
+  in_language(q, a);
+  gdefssql_sb_kw(q->sb, " AND ");
   gdefssql_sb_col(q->sb, a, "fld");
   gdefssql_sb_kw(q->sb, " = ");
   gdefssql_sb_int(q->sb, f.id);
@@ -743,6 +773,10 @@ static void statement(Qc * q, const Scope * main, int page) {
     gdefssql_sb_col(q->sb, "a2", "ent");
     gdefssql_sb_kw(q->sb, " = ");
     gdefssql_sb_col(q->sb, main->e, "rid");
+    /* In the ON, not the WHERE: an entity with no root in the language
+     * stays, with no value to sort by. */
+    gdefssql_sb_kw(q->sb, " AND ");
+    in_language(q, "a2");
   }
   if (query->where != NULL) {
     gdefssql_sb_kw(q->sb, " WHERE ");
@@ -796,7 +830,8 @@ GDEFSTOR_Result gdefssql_compile_plan(const GDEFSSQL_Dialect * d,
   if (d == NULL || plan == NULL || plan->query == NULL || plan->type == NULL ||
       tnos == NULL || ntnos != 1 + plan->exists_count ||
       (plan->exists_count > 0 && plan->exists_types == NULL) ||
-      plan->query->size != sizeof(GDEFSTOR_Query)) {
+      plan->query->size != sizeof(GDEFSTOR_Query) ||
+      plan->query->language == NULL || plan->query->language_len == 0) {
     return GDEFSTOR_ERR_INVALID;
   }
   query = plan->query;

@@ -129,8 +129,14 @@
 extern "C" {
 #endif
 
-/** The layout version `dss_schema` records. A store holding another is refused. */
-#define GDEFSSQL_SCHEMA_VERSION 1
+/**
+ * The layout version `dss_schema` records. A store holding another is refused.
+ * 2 since the language axis (story S6a2): every item, current and blind row
+ * holds its language and every revision row its languages, so a store of
+ * layout 1 has a shape this library no longer reads and is refused as older
+ * (::GDEFSTOR_ERR_FORMAT). Nothing was released, so nothing is migrated.
+ */
+#define GDEFSSQL_SCHEMA_VERSION 2
 
 /**
  * @brief Make the entity backend for one engine.

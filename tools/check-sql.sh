@@ -25,6 +25,7 @@ plant_control testKeystore 'KeyStore.*'
 plant_control testConformance 'ModelBlind.*'
 plant_control testBlind 'BlindSql.*'
 plant_control testConformance 'ModelRecords.*:ModelCounters.*:ModelOutbox.*:ModelSystem.*'
+plant_control testConformance 'ModelLanguage*'
 
 # An identifier made from the caller's field name, with the one gate on
 # identifiers (gdefssql_sb_ident's check) gone: caller text in SQL.
@@ -318,5 +319,26 @@ plant rebuild-clears-records src/backend.c testConformance \
     if (rc == GDEFSTOR_OK) {
       rc = delete_all(&x->cx, "dss_record");
     }'
+
+# The language axis (story S6a2) -------------------------------------------
+
+# A predicate reading another language: a field's subquery over the current
+# table loses its language condition, so it reads every language's items.
+plant language-other-read src/compile.c testConformance \
+  'ModelLanguage.AQueryReadsOnlyItsLanguage ModelLanguageSweep.SeededHistoriesAgreeWithAModel' \
+  '  gdefssql_sb_kw(q->sb, " WHERE ");
+  in_language(q, a);
+  gdefssql_sb_kw(q->sb, " AND ");
+  if (l->kind == SRC_VALUES || r->kind == SRC_VALUES) {' \
+  '  gdefssql_sb_kw(q->sb, " WHERE ");
+  if (l->kind == SRC_VALUES || r->kind == SRC_VALUES) {'
+
+# A sort reading another language: the sort's join to the root group loses
+# its language, so an entity sorts by (and is listed once per) any language.
+plant language-other-sort src/compile.c testConformance \
+  'ModelLanguage.AQueryReadsOnlyItsLanguage ModelLanguage.AnEntityWithNoTreeInTheLanguageMatchesNoField' \
+  '    gdefssql_sb_kw(q->sb, " AND ");
+    in_language(q, "a2");' \
+  ''
 
 plant_finish

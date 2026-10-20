@@ -505,10 +505,11 @@ static GDEFSTOR_Result visit_entities(Cx * c, uint32_t tno, uint64_t rid,
 /* ---- items ---------------------------------------------------------------- */
 
 /* Visit item versions of group @p g: from the truth (@p truth) or the current
- * table; of entity @p rid or (0) all; with @p as_of, those valid in it. */
+ * table; of entity @p rid or (0) all; with @p as_of, those valid in it; of
+ * language @p lang, or (@p lang_len 0) every language. */
 static GDEFSTOR_Result visit_items(Cx * c, uint32_t tno,
     const GDEFSSQL_CatGroup * g, int truth, uint64_t rid, uint64_t as_of,
-    const GDEFSTOR_ModelVisitor * visitor) {
+    const char * lang, size_t lang_len, const GDEFSTOR_ModelVisitor * visitor) {
   char t[GDEFSSQL_NAME_CAP];
   char col[GDEFSSQL_NAME_CAP];
   Sb sb;
@@ -516,7 +517,7 @@ static GDEFSTOR_Result visit_items(Cx * c, uint32_t tno,
   GDEFSTOR_Value * vals = NULL;
   size_t nvals = 0;
   size_t i;
-  unsigned base = truth ? 6 : 5;
+  unsigned base = truth ? 7 : 6;
   int row = 0;
   GDEFSTOR_Result rc;
   if (visitor->item == NULL) {
@@ -544,6 +545,8 @@ static GDEFSTOR_Result visit_items(Cx * c, uint32_t tno,
   gdefssql_sb_col(&sb, "a0", "parent");
   gdefssql_sb_kw(&sb, ", ");
   gdefssql_sb_col(&sb, "a0", "ord");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "lang");
   for (i = 0; i < g->ncols; i++) {
     gdefssql_sb_kw(&sb, ", ");
     gdefssql_name_column(col, g->cols[i].col, 0);
@@ -560,6 +563,10 @@ static GDEFSTOR_Result visit_items(Cx * c, uint32_t tno,
   if (rid != 0) {
     GDEFSSQL_Datum v = dint((int64_t)rid);
     where_eq(&sb, " WHERE ", "ent", &v);
+    if (lang_len != 0) {
+      GDEFSSQL_Datum l = dbytes(GDEFSSQL_DATUM_TEXT, lang, lang_len);
+      where_eq(&sb, " AND ", "lang", &l);
+    }
     if (as_of != 0) {
       GDEFSSQL_Datum a = dint((int64_t)as_of);
       gdefssql_sb_kw(&sb, " AND ");
@@ -577,6 +584,8 @@ static GDEFSTOR_Result visit_items(Cx * c, uint32_t tno,
   }
   gdefssql_sb_kw(&sb, " ORDER BY ");
   gdefssql_sb_col(&sb, "a0", "ent");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "lang");
   gdefssql_sb_kw(&sb, ", ");
   gdefssql_sb_col(&sb, "a0", "item");
   gdefssql_sb_kw(&sb, ", ");
@@ -617,6 +626,13 @@ static GDEFSTOR_Result visit_items(Cx * c, uint32_t tno,
     }
     if (rc == GDEFSTOR_OK) {
       rc = gdefssql_st_real(&s, at++, &it.order, NULL);
+    }
+    if (rc == GDEFSTOR_OK) {
+      const uint8_t * p = NULL;
+      size_t n = 0;
+      rc = gdefssql_st_bytes(&s, at++, GDEFSSQL_DATUM_TEXT, &p, &n, NULL);
+      it.language = (const char *)p;
+      it.language_len = n;
     }
     if (rc == GDEFSTOR_OK && at != base) {
       rc = GDEFSTOR_ERR_INTERNAL;
@@ -681,12 +697,14 @@ static GDEFSTOR_Result visit_items(Cx * c, uint32_t tno,
 }
 
 static GDEFSTOR_Result visit_all_items(Cx * c, uint32_t tno, int truth,
-    uint64_t rid, uint64_t as_of, const GDEFSTOR_ModelVisitor * visitor) {
+    uint64_t rid, uint64_t as_of, const char * lang, size_t lang_len,
+    const GDEFSTOR_ModelVisitor * visitor) {
   GDEFSSQL_Cat cat;
   size_t i;
   GDEFSTOR_Result rc = gdefssql_cat_load(c, tno, &cat);
   for (i = 0; rc == GDEFSTOR_OK && i < cat.ngroups; i++) {
-    rc = visit_items(c, tno, &cat.groups[i], truth, rid, as_of, visitor);
+    rc = visit_items(c, tno, &cat.groups[i], truth, rid, as_of, lang,
+        lang_len, visitor);
   }
   gdefssql_cat_free(&cat);
   return rc;
@@ -697,7 +715,7 @@ static GDEFSTOR_Result visit_all_items(Cx * c, uint32_t tno, int truth,
 static GDEFSTOR_Result visit_revisions(Cx * c, uint32_t tno, uint64_t rid,
     const GDEFSTOR_ModelVisitor * visitor) {
   static const char * const cols[] = {"rid", "rev", "cseq", "who", "at",
-      "why"};
+      "why", "langs"};
   char t[GDEFSSQL_NAME_CAP];
   Sb sb;
   St s;
@@ -709,7 +727,7 @@ static GDEFSTOR_Result visit_revisions(Cx * c, uint32_t tno, uint64_t rid,
   }
   sb_open(&sb, c);
   gdefssql_sb_kw(&sb, "SELECT ");
-  for (i = 0; i < 6; i++) {
+  for (i = 0; i < 7; i++) {
     gdefssql_sb_kw(&sb, i == 0 ? "" : ", ");
     gdefssql_sb_col(&sb, "a0", cols[i]);
   }
@@ -749,6 +767,11 @@ static GDEFSTOR_Result visit_revisions(Cx * c, uint32_t tno, uint64_t rid,
       rc = gdefssql_st_bytes(&s, 5, GDEFSSQL_DATUM_TEXT, &p, &n, NULL);
       r.why = p == NULL ? "" : (const char *)p;
       r.why_len = n;
+    }
+    if (rc == GDEFSTOR_OK) {
+      rc = gdefssql_st_bytes(&s, 6, GDEFSSQL_DATUM_TEXT, &p, &n, NULL);
+      r.languages = p == NULL ? "" : (const char *)p;
+      r.languages_len = n;
     }
     if (rc == GDEFSTOR_OK && (v[0] <= 0 || v[1] <= 0 || v[2] <= 0)) {
       rc = GDEFSTOR_ERR_CORRUPT;
@@ -854,12 +877,13 @@ static GDEFSTOR_Result has_blind(Cx * c, uint32_t tno, int * out) {
   return rc;
 }
 
-/* Visit (`blind`) the blind rows of type @p tno: of entity @p rid, or (0) all.
- * The caller has seen that the table exists. */
+/* Visit (`blind`) the blind rows of type @p tno: of entity @p rid, or (0) all;
+ * of language @p lang, or (@p lang_len 0) every language. The caller has seen
+ * that the table exists. */
 static GDEFSTOR_Result visit_blinds(Cx * c, uint32_t tno, uint64_t rid,
-    const GDEFSTOR_ModelVisitor * visitor) {
+    const char * lang, size_t lang_len, const GDEFSTOR_ModelVisitor * visitor) {
   static const char * const cols[] = {"ent", "item", "vfrom", "fld",
-      "subject", "mac", "kid", "norm"};
+      "subject", "mac", "kid", "norm", "lang"};
   char t[GDEFSSQL_NAME_CAP];
   Sb sb;
   St s;
@@ -871,7 +895,7 @@ static GDEFSTOR_Result visit_blinds(Cx * c, uint32_t tno, uint64_t rid,
   }
   sb_open(&sb, c);
   gdefssql_sb_kw(&sb, "SELECT ");
-  for (i = 0; i < 8; i++) {
+  for (i = 0; i < 9; i++) {
     gdefssql_sb_kw(&sb, i == 0 ? "" : ", ");
     gdefssql_sb_col(&sb, "a0", cols[i]);
   }
@@ -880,6 +904,10 @@ static GDEFSTOR_Result visit_blinds(Cx * c, uint32_t tno, uint64_t rid,
   if (rid != 0) {
     GDEFSSQL_Datum v = dint((int64_t)rid);
     where_eq(&sb, " WHERE ", "ent", &v);
+    if (lang_len != 0) {
+      GDEFSSQL_Datum l = dbytes(GDEFSSQL_DATUM_TEXT, lang, lang_len);
+      where_eq(&sb, " AND ", "lang", &l);
+    }
   }
   gdefssql_sb_kw(&sb, " ORDER BY ");
   for (i = 0; i < 4; i++) {
@@ -919,6 +947,11 @@ static GDEFSTOR_Result visit_blinds(Cx * c, uint32_t tno, uint64_t rid,
     }
     if (rc == GDEFSTOR_OK) {
       rc = gdefssql_st_int(&s, 7, &norm, NULL);
+    }
+    if (rc == GDEFSTOR_OK) {
+      rc = gdefssql_st_bytes(&s, 8, GDEFSSQL_DATUM_TEXT, &p, &n, NULL);
+      b.language = (const char *)p;
+      b.language_len = n;
     }
     if (rc == GDEFSTOR_OK &&
         (v[0] <= 0 || v[1] <= 0 || v[2] <= 0 || v[3] < 0 ||
@@ -961,7 +994,7 @@ static GDEFSTOR_Result insert_blinds(Cx * c, uint32_t tno,
   gdefssql_name_table(t, tno, GDEFSSQL_ROLE_BLIND, 0);
   for (i = 0; rc == GDEFSTOR_OK && i < a->blind_count; i++) {
     const GDEFSTOR_ModelBlind * b = &a->blinds[i];
-    Kv kv[8];
+    Kv kv[9];
     size_t k;
     int indexed = 0;
     for (k = 0; k < a->insert_count; k++) {
@@ -970,7 +1003,8 @@ static GDEFSTOR_Result insert_blinds(Cx * c, uint32_t tno,
     /* A blind row without the version it indexes is the port's invariant
      * broken: nothing is written. */
     if (!indexed || b->valid_from != rev || b->mac == NULL ||
-        !fits(b->item) || (b->subject == NULL && b->subject_len != 0)) {
+        !fits(b->item) || (b->subject == NULL && b->subject_len != 0) ||
+        b->language == NULL || b->language_len == 0) {
       return GDEFSTOR_ERR_INTERNAL;
     }
     kv[0].col = "ent";
@@ -989,7 +1023,9 @@ static GDEFSTOR_Result insert_blinds(Cx * c, uint32_t tno,
     kv[6].v = dint(b->key_id);
     kv[7].col = "norm";
     kv[7].v = dint(b->version);
-    rc = insert(c, t, kv, 8);
+    kv[8].col = "lang";
+    kv[8].v = dbytes(GDEFSSQL_DATUM_TEXT, b->language, b->language_len);
+    rc = insert(c, t, kv, 9);
   }
   return rc;
 }
@@ -1596,11 +1632,14 @@ static GDEFSTOR_Result close_version(Cx * c, uint32_t tno,
   GDEFSSQL_Datum item = dint((int64_t)cl->item);
   GDEFSSQL_Datum from_rev = dint((int64_t)cl->valid_from);
   GDEFSSQL_Datum to = dint((int64_t)rev);
+  GDEFSSQL_Datum lang = dbytes(GDEFSSQL_DATUM_TEXT, cl->language,
+      cl->language_len);
   int got = 0;
   int nul = 0;
   int64_t vto = 0;
   GDEFSTOR_Result rc;
-  if (!fits(cl->item) || !fits(cl->valid_from)) {
+  if (!fits(cl->item) || !fits(cl->valid_from) || cl->language == NULL ||
+      cl->language_len == 0) {
     return GDEFSTOR_ERR_INTERNAL;
   }
   gdefssql_name_table(t, tno, GDEFSSQL_ROLE_GROUP, cl->group);
@@ -1609,6 +1648,7 @@ static GDEFSTOR_Result close_version(Cx * c, uint32_t tno,
   gdefssql_sb_col(&sb, "a0", "vto");
   from(&sb, t);
   where_eq(&sb, " WHERE ", "ent", &ent);
+  where_eq(&sb, " AND ", "lang", &lang);
   where_eq(&sb, " AND ", "item", &item);
   where_eq(&sb, " AND ", "vfrom", &from_rev);
   rc = gdefssql_st_open(c, &sb, &s);
@@ -1630,6 +1670,7 @@ static GDEFSTOR_Result close_version(Cx * c, uint32_t tno,
     gdefssql_sb_table(&sb, t);
     bare_eq(&sb, " SET ", "vto", &to);
     bare_eq(&sb, " WHERE ", "ent", &ent);
+    bare_eq(&sb, " AND ", "lang", &lang);
     bare_eq(&sb, " AND ", "item", &item);
     bare_eq(&sb, " AND ", "vfrom", &from_rev);
     rc = gdefssql_cx_run(c, &sb);
@@ -1640,6 +1681,7 @@ static GDEFSTOR_Result close_version(Cx * c, uint32_t tno,
     gdefssql_sb_kw(&sb, "DELETE FROM ");
     gdefssql_sb_table(&sb, t);
     bare_eq(&sb, " WHERE ", "ent", &ent);
+    bare_eq(&sb, " AND ", "lang", &lang);
     bare_eq(&sb, " AND ", "item", &item);
     rc = gdefssql_cx_run(c, &sb);
   }
@@ -1661,10 +1703,11 @@ static GDEFSTOR_Result insert_version(Cx * c, uint32_t tno,
   GDEFSTOR_Result rc = GDEFSTOR_OK;
   if (g == NULL || !fits(it->item) || !fits(it->parent) || it->item == 0 ||
       (it->values == NULL && it->value_count != 0) ||
-      !(it->order == it->order) || it->order - it->order != 0.0) {
+      !(it->order == it->order) || it->order - it->order != 0.0 ||
+      it->language == NULL || it->language_len == 0) {
     return GDEFSTOR_ERR_INTERNAL;
   }
-  kv = (Kv *)gdefssql_mem0(c->b->alloc, (5 + 2 * it->value_count) * sizeof *kv);
+  kv = (Kv *)gdefssql_mem0(c->b->alloc, (6 + 2 * it->value_count) * sizeof *kv);
   names = (char (*)[GDEFSSQL_NAME_CAP])gdefssql_mem0(c->b->alloc,
       (2 * it->value_count + 1) * sizeof *names);
   if (kv == NULL || names == NULL) {
@@ -1674,6 +1717,8 @@ static GDEFSTOR_Result insert_version(Cx * c, uint32_t tno,
   }
   kv[n].col = "ent";
   kv[n++].v = dint((int64_t)row);
+  kv[n].col = "lang";
+  kv[n++].v = dbytes(GDEFSSQL_DATUM_TEXT, it->language, it->language_len);
   kv[n].col = "item";
   kv[n++].v = dint((int64_t)it->item);
   kv[n].col = "vfrom";
@@ -1744,7 +1789,8 @@ static GDEFSTOR_Result m_apply(void * ctx, void * txn,
   r = a->revision;
   if (!fits(r->revision) || r->revision == 0 || !fits(a->last_item) ||
       (r->who == NULL && r->who_len != 0) ||
-      (r->why == NULL && r->why_len != 0)) {
+      (r->why == NULL && r->why_len != 0) || r->languages == NULL ||
+      r->languages_len == 0) {
     return GDEFSTOR_ERR_INVALID;
   }
   rc = entity_tno(&x->cx, a->row, &tno);
@@ -1782,7 +1828,7 @@ static GDEFSTOR_Result m_apply(void * ctx, void * txn,
   }
   gdefssql_cat_free(&cat);
   if (rc == GDEFSTOR_OK) {
-    Kv kv[6];
+    Kv kv[7];
     kv[0].col = "rid";
     kv[0].v = dint((int64_t)a->row);
     kv[1].col = "rev";
@@ -1795,8 +1841,10 @@ static GDEFSTOR_Result m_apply(void * ctx, void * txn,
     kv[4].v = dint(r->when_ms);
     kv[5].col = "why";
     kv[5].v = dbytes(GDEFSSQL_DATUM_TEXT, r->why, r->why_len);
+    kv[6].col = "langs";
+    kv[6].v = dbytes(GDEFSSQL_DATUM_TEXT, r->languages, r->languages_len);
     gdefssql_name_table(t, tno, GDEFSSQL_ROLE_REVISION, 0);
-    rc = insert(&x->cx, t, kv, 6);
+    rc = insert(&x->cx, t, kv, 7);
   }
   if (rc == GDEFSTOR_OK) {
     Sb sb;
@@ -1843,8 +1891,8 @@ static GDEFSTOR_Result m_history(void * ctx, void * txn, const char * tenant,
 }
 
 static GDEFSTOR_Result m_items(void * ctx, void * txn, const char * tenant,
-    size_t tenant_len, uint64_t row, uint64_t as_of,
-    const GDEFSTOR_ModelVisitor * visitor) {
+    size_t tenant_len, uint64_t row, uint64_t as_of, const char * lang,
+    size_t lang_len, const GDEFSTOR_ModelVisitor * visitor) {
   Back * b = (Back *)ctx;
   Rd r;
   uint32_t tno = 0;
@@ -1861,16 +1909,89 @@ static GDEFSTOR_Result m_items(void * ctx, void * txn, const char * tenant,
   }
   rc = entity_tno(r.c, row, &tno);
   if (rc == GDEFSTOR_OK) {
-    rc = visit_all_items(r.c, tno, as_of != 0, row, as_of, visitor);
+    rc = visit_all_items(r.c, tno, as_of != 0, row, as_of, lang, lang_len,
+        visitor);
   }
   if (rc == GDEFSTOR_OK && visitor->blind != NULL) {
-    /* Every blind row of the entity: the port picks those of the versions
-     * it read. */
+    /* Every blind row of the entity in the language: the port picks those
+     * of the versions it read. */
     int blind = 0;
     rc = has_blind(r.c, tno, &blind);
     if (rc == GDEFSTOR_OK && blind) {
-      rc = visit_blinds(r.c, tno, row, visitor);
+      rc = visit_blinds(r.c, tno, row, lang, lang_len, visitor);
     }
+  }
+  if (rc == GDEFSTOR_ERR_INVALID) {
+    GDEFSTOR_Result end = rd_close(&r, GDEFSTOR_OK);
+    return end == GDEFSTOR_OK ? GDEFSTOR_ERR_INVALID : end;
+  }
+  return rd_close(&r, rc);
+}
+
+/* The languages an entity has a tree in: its root items (group 0, one per
+ * language), current or valid at @p as_of, by the root group's key. */
+static GDEFSTOR_Result m_languages(void * ctx, void * txn, const char * tenant,
+    size_t tenant_len, uint64_t row, uint64_t as_of,
+    const GDEFSTOR_ModelVisitor * visitor) {
+  Back * b = (Back *)ctx;
+  Rd r;
+  uint32_t tno = 0;
+  GDEFSTOR_Result rc;
+  if (!fits(as_of) || visitor == NULL || visitor->language == NULL) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  rc = rd_open(b, (Txn *)txn, tenant, tenant_len, &r);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  if (r.empty) {
+    return GDEFSTOR_ERR_INVALID;
+  }
+  rc = entity_tno(r.c, row, &tno);
+  if (rc == GDEFSTOR_OK) {
+    char t[GDEFSSQL_NAME_CAP];
+    Sb sb;
+    St s;
+    GDEFSSQL_Datum ent = dint((int64_t)row);
+    int got = 0;
+    sb_open(&sb, r.c);
+    gdefssql_sb_kw(&sb, "SELECT ");
+    gdefssql_sb_col(&sb, "a0", "lang");
+    gdefssql_name_table(t, tno,
+        as_of == 0 ? GDEFSSQL_ROLE_CURRENT : GDEFSSQL_ROLE_GROUP, 0);
+    from(&sb, t);
+    where_eq(&sb, " WHERE ", "ent", &ent);
+    if (as_of != 0) {
+      GDEFSSQL_Datum a = dint((int64_t)as_of);
+      gdefssql_sb_kw(&sb, " AND ");
+      gdefssql_sb_col(&sb, "a0", "vfrom");
+      gdefssql_sb_kw(&sb, " <= ");
+      gdefssql_sb_param(&sb, &a);
+      gdefssql_sb_kw(&sb, " AND (");
+      gdefssql_sb_col(&sb, "a0", "vto");
+      gdefssql_sb_kw(&sb, " IS NULL OR ");
+      gdefssql_sb_col(&sb, "a0", "vto");
+      gdefssql_sb_kw(&sb, " > ");
+      gdefssql_sb_param(&sb, &a);
+      gdefssql_sb_kw(&sb, ")");
+    }
+    gdefssql_sb_kw(&sb, " ORDER BY ");
+    gdefssql_sb_col(&sb, "a0", "lang");
+    rc = gdefssql_st_open(r.c, &sb, &s);
+    while (rc == GDEFSTOR_OK) {
+      const uint8_t * p = NULL;
+      size_t n = 0;
+      rc = gdefssql_st_step(&s, &got);
+      if (rc != GDEFSTOR_OK || !got) {
+        break;
+      }
+      rc = gdefssql_st_bytes(&s, 0, GDEFSSQL_DATUM_TEXT, &p, &n, NULL);
+      if (rc == GDEFSTOR_OK) {
+        rc = visitor->language(visitor->ctx, row, (const char *)p, n);
+      }
+    }
+    gdefssql_st_close(&s);
+    gdefssql_sb_free(&sb);
   }
   if (rc == GDEFSTOR_ERR_INVALID) {
     GDEFSTOR_Result end = rd_close(&r, GDEFSTOR_OK);
@@ -2309,7 +2430,8 @@ static void collect_free(RCollect * r) {
 /* Rebuild tN_cG from tN_gG's open versions, in one statement. */
 static GDEFSTOR_Result rebuild_group(Cx * c, uint32_t tno,
     const GDEFSSQL_CatGroup * g) {
-  static const char * const fixed[] = {"ent", "item", "vfrom", "parent", "ord"};
+  static const char * const fixed[] = {"ent", "lang", "item", "vfrom",
+      "parent", "ord"};
   char t[GDEFSSQL_NAME_CAP];
   char col[GDEFSSQL_NAME_CAP];
   Sb sb;
@@ -2329,7 +2451,7 @@ static GDEFSTOR_Result rebuild_group(Cx * c, uint32_t tno,
     if (pass == 1) {
       gdefssql_sb_kw(&sb, ") SELECT ");
     }
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < 6; i++) {
       gdefssql_sb_kw(&sb, i == 0 ? "" : ", ");
       if (pass == 0) {
         gdefssql_sb_ident(&sb, fixed[i]);
@@ -2555,13 +2677,13 @@ static GDEFSTOR_Result m_dump(void * ctx, const char * tenant,
       rc = visit_states(r.c, tnos[i], 0, visitor);
     }
     if (rc == GDEFSTOR_OK) {
-      rc = visit_all_items(r.c, tnos[i], truth, 0, 0, visitor);
+      rc = visit_all_items(r.c, tnos[i], truth, 0, 0, NULL, 0, visitor);
     }
     if (rc == GDEFSTOR_OK && truth && visitor->blind != NULL) {
       int blind = 0;
       rc = has_blind(r.c, tnos[i], &blind);
       if (rc == GDEFSTOR_OK && blind) {
-        rc = visit_blinds(r.c, tnos[i], 0, visitor);
+        rc = visit_blinds(r.c, tnos[i], 0, NULL, 0, visitor);
       }
     }
   }
@@ -2672,6 +2794,8 @@ static GDEFSTOR_Result m_blind_history(void * ctx, const char * tenant,
     gdefssql_sb_col(&sb, "a0", "kid");
     gdefssql_sb_kw(&sb, ", ");
     gdefssql_sb_col(&sb, "a0", "norm");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a0", "lang");
     gdefssql_name_table(t, tno, GDEFSSQL_ROLE_BLIND, 0);
     from(&sb, t);
     gdefssql_sb_kw(&sb, " JOIN ");
@@ -2692,6 +2816,10 @@ static GDEFSTOR_Result m_blind_history(void * ctx, const char * tenant,
     gdefssql_sb_col(&sb, "a2", "ent");
     gdefssql_sb_kw(&sb, " = ");
     gdefssql_sb_col(&sb, "a0", "ent");
+    gdefssql_sb_kw(&sb, " AND ");
+    gdefssql_sb_col(&sb, "a2", "lang");
+    gdefssql_sb_kw(&sb, " = ");
+    gdefssql_sb_col(&sb, "a0", "lang");
     gdefssql_sb_kw(&sb, " AND ");
     gdefssql_sb_col(&sb, "a2", "item");
     gdefssql_sb_kw(&sb, " = ");
@@ -2740,6 +2868,11 @@ static GDEFSTOR_Result m_blind_history(void * ctx, const char * tenant,
       }
       if (rc == GDEFSTOR_OK) {
         rc = gdefssql_st_int(&s, 7, &norm, NULL);
+      }
+      if (rc == GDEFSTOR_OK) {
+        rc = gdefssql_st_bytes(&s, 8, GDEFSSQL_DATUM_TEXT, &p, &n, NULL);
+        h.language = (const char *)p;
+        h.language_len = n;
       }
       if (rc == GDEFSTOR_OK &&
           (v[0] <= 0 || v[1] <= 0 || v[2] <= 0 || (!nul && vto <= 0) ||
@@ -2818,6 +2951,8 @@ static GDEFSTOR_Result m_subject_lookup(void * ctx, const char * tenant,
     gdefssql_sb_col(&sb, "a0", "vfrom");
     gdefssql_sb_kw(&sb, ", ");
     gdefssql_sb_col(&sb, "a0", "vto");
+    gdefssql_sb_kw(&sb, ", ");
+    gdefssql_sb_col(&sb, "a0", "lang");
     gdefssql_name_table(t, cols[i].tno, GDEFSSQL_ROLE_GROUP, cols[i].grp);
     from(&sb, t);
     gdefssql_sb_kw(&sb, " JOIN ");
@@ -2858,6 +2993,11 @@ static GDEFSTOR_Result m_subject_lookup(void * ctx, const char * tenant,
       }
       if (rc == GDEFSTOR_OK) {
         rc = gdefssql_st_int(&s, 4, &vto, &nul);
+      }
+      if (rc == GDEFSTOR_OK) {
+        rc = gdefssql_st_bytes(&s, 5, GDEFSSQL_DATUM_TEXT, &p, &n, NULL);
+        h.language = (const char *)p;
+        h.language_len = n;
       }
       if (rc == GDEFSTOR_OK &&
           (k[0] <= 0 || k[1] <= 0 || k[2] <= 0 || (!nul && vto <= 0))) {
@@ -4091,5 +4231,7 @@ GDEFSSQL_Result gdefssql_model_backend(const GDEFSSQL_Dialect * dialect,
   out->outbox_delete = m_outbox_delete;
   out->outbox_fail = m_outbox_fail;
   out->outbox_parked = m_outbox_parked;
+  out->lang_ctx = b;
+  out->languages = m_languages;
   return GDEFSSQL_OK;
 }

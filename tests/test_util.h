@@ -255,7 +255,8 @@ inline GDEFSTOR_RevisionMeta Meta() {
 inline GDEFSTOR_Result Put(GDEFSTOR_Store * store, const std::string & type,
     const std::string & pid, const Node & tree, uint64_t base, bool create,
     uint64_t * out_rev = nullptr, const std::string & creator = "",
-    int64_t created = 5, const char * tenant = kTenant) {
+    int64_t created = 5, const char * tenant = kTenant,
+    const char * lang = "en") {
   return InWrite(store, [&](GDEFSTOR_Write * w) {
     GDEFSTOR_Result rc = GDEFSTOR_OK;
     if (create) {
@@ -272,7 +273,8 @@ inline GDEFSTOR_Result Put(GDEFSTOR_Store * store, const std::string & type,
     }
     GDEFSTOR_RevisionMeta m = Meta();
     if (rc == GDEFSTOR_OK) {
-      rc = gdefstor_entity_save(w, pid.data(), pid.size(), base, &m, t, out_rev);
+      rc = gdefstor_entity_save(w, pid.data(), pid.size(), base, &m, lang,
+          std::strlen(lang), t, out_rev);
     }
     gdefstor_tree_free(t);
     return rc;

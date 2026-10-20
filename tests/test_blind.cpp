@@ -88,7 +88,7 @@ GDEFSTOR_Result SaveMember(GDEFSTOR_Store * store, const std::string & pid,
     }
     GDEFSTOR_RevisionMeta meta = Meta();
     if (rc == GDEFSTOR_OK) {
-      rc = gdefstor_entity_save(w, pid.data(), pid.size(), base, &meta, t,
+      rc = gdefstor_entity_save(w, pid.data(), pid.size(), base, &meta, "en", 2, t,
           nullptr);
     }
     gdefstor_tree_free(t);

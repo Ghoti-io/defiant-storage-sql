@@ -225,6 +225,8 @@ GDEFSTOR_Query Query(const GDEFSTOR_QueryNode * where,
   GDEFSTOR_Query q;
   std::memset(&q, 0, sizeof q);
   q.size = sizeof q;
+  q.language = "en";
+  q.language_len = 2;
   q.where = where;
   q.sorts = sorts;
   q.sort_count = nsorts;
@@ -273,58 +275,72 @@ TEST_F(Compile, TheFormHasThisTextInEachDialect) {
   ASSERT_EQ(GDEFSSQL_OK, c.rc);
   ASSERT_EQ(2u, c.text.size());
   EXPECT_EQ(std::string(
-      "SELECT \"a0\".\"rid\", \"a0\".\"pid\" FROM \"t1_e\" \"a0\" JOIN \"t1_n\" \"a1\" ON \"a1"
-      "\".\"rid\" = \"a0\".\"rid\" LEFT JOIN \"t1_c0\" \"a2\" ON \"a2\".\"ent\" = \"a0\".\"rid\""
-      " WHERE ((\"a0\".\"rid\" IN (SELECT \"a3\".\"ent\" FROM \"t1_c0\" \"a3\" WHERE (\"a3"
-      "\".\"v0\" = ?))) AND (\"a0\".\"rid\" IN (SELECT \"a4\".\"ent\" FROM \"t1_c3\" \"a4\" "
-      "WHERE (\"a4\".\"v0\" > ?))) AND (\"a0\".\"rid\" IN (SELECT \"a5\".\"ent\" FROM \"t1"
-      "_c1\" \"a5\" WHERE \"a5\".\"v0\" IN (?, ?))) AND (NOT (\"a0\".\"rid\" IN (SELECT "
-      "\"a6\".\"ent\" FROM \"t1_c0\" \"a6\" WHERE \"a6\".\"v2\" < \"a0\".\"created\"))) AND ("
-      "NOT ((\"a0\".\"pid\" = ?))) AND (\"a0\".\"creator\" IS NOT NULL AND (\"a0\".\"cre"
-      "ator\" = ?)) AND (NULL IS NOT NULL) AND EXISTS (SELECT NULL FROM \"t2_e\""
-      " \"a7\" JOIN \"t2_n\" \"a8\" ON \"a8\".\"rid\" = \"a7\".\"rid\" WHERE ((\"a7\".\"rid\" I"
-      "N (SELECT \"a9\".\"ent\" FROM \"t2_c0\" \"a9\" WHERE \"a9\".\"v1\" = \"a0\".\"pid\")) "
-      "AND EXISTS (SELECT NULL FROM \"t2_c0\" \"a10\" JOIN \"t1_c2\" \"a11\" ON \"a11\""
-      ".\"ent\" = \"a0\".\"rid\" WHERE \"a10\".\"ent\" = \"a7\".\"rid\" AND \"a10\".\"v0\" = \"a"
-      "11\".\"v0\")))) ORDER BY \"a2\".\"v1\" DESC, \"a0\".\"creator\", \"a0\".\"rid\" LIMIT"
-      " ? OFFSET ?"), c.text[1]);
+      "SELECT \"a0\".\"rid\", \"a0\".\"pid\" FROM \"t1_e\" \"a0\" JOIN \"t1_n\""
+      " \"a1\" ON \"a1\".\"rid\" = \"a0\".\"rid\" LEFT JOIN \"t1_c0\" \"a2\" ON"
+      " \"a2\".\"ent\" = \"a0\".\"rid\" AND \"a2\".\"lang\" = ? WHERE ((\"a0\"."
+      "\"rid\" IN (SELECT \"a3\".\"ent\" FROM \"t1_c0\" \"a3\" WHERE \"a3\".\"l"
+      "ang\" = ? AND (\"a3\".\"v0\" = ?))) AND (\"a0\".\"rid\" IN (SELECT \"a4"
+      "\".\"ent\" FROM \"t1_c3\" \"a4\" WHERE \"a4\".\"lang\" = ? AND (\"a4\"."
+      "\"v0\" > ?))) AND (\"a0\".\"rid\" IN (SELECT \"a5\".\"ent\" FROM \"t1_c1"
+      "\" \"a5\" WHERE \"a5\".\"lang\" = ? AND \"a5\".\"v0\" IN (?, ?))) AND (N"
+      "OT (\"a0\".\"rid\" IN (SELECT \"a6\".\"ent\" FROM \"t1_c0\" \"a6\" WHERE"
+      " \"a6\".\"lang\" = ? AND \"a6\".\"v2\" < \"a0\".\"created\"))) AND (NOT "
+      "((\"a0\".\"pid\" = ?))) AND (\"a0\".\"creator\" IS NOT NULL AND (\"a0\"."
+      "\"creator\" = ?)) AND (NULL IS NOT NULL) AND EXISTS (SELECT NULL FROM \""
+      "t2_e\" \"a7\" JOIN \"t2_n\" \"a8\" ON \"a8\".\"rid\" = \"a7\".\"rid\" WH"
+      "ERE ((\"a7\".\"rid\" IN (SELECT \"a9\".\"ent\" FROM \"t2_c0\" \"a9\" WHE"
+      "RE \"a9\".\"lang\" = ? AND \"a9\".\"v1\" = \"a0\".\"pid\")) AND EXISTS ("
+      "SELECT NULL FROM \"t2_c0\" \"a10\" JOIN \"t1_c2\" \"a11\" ON \"a11\".\"e"
+      "nt\" = \"a0\".\"rid\" AND \"a11\".\"lang\" = ? WHERE \"a10\".\"ent\" = "
+      "\"a7\".\"rid\" AND \"a10\".\"lang\" = ? AND \"a10\".\"v0\" = \"a11\".\"v"
+      "0\")))) ORDER BY \"a2\".\"v1\" DESC, \"a0\".\"creator\", \"a0\".\"rid\" "
+      "LIMIT ? OFFSET ?"), c.text[1]);
   Compiled f = CompileOf(sqlstub::FakeDialect(), "s1", p);
   ASSERT_EQ(GDEFSSQL_OK, f.rc);
   EXPECT_EQ(std::string(
-      "SELECT [a0].[rid], [a0].[pid] FROM [s1].[t1_e] [a0] JOIN [s1].[t1_n] ["
-      "a1] ON [a1].[rid] = [a0].[rid] LEFT JOIN [s1].[t1_c0] [a2] ON [a2].[en"
-      "t] = [a0].[rid] WHERE (([a0].[rid] IN (SELECT [a3].[ent] FROM [s1].[t1"
-      "_c0] [a3] WHERE ([a3].[v0] = :1))) AND ([a0].[rid] IN (SELECT [a4].[en"
-      "t] FROM [s1].[t1_c3] [a4] WHERE ([a4].[v0] > :2))) AND ([a0].[rid] IN "
-      "(SELECT [a5].[ent] FROM [s1].[t1_c1] [a5] WHERE [a5].[v0] IN (:3, :4))"
-      ") AND (NOT ([a0].[rid] IN (SELECT [a6].[ent] FROM [s1].[t1_c0] [a6] WH"
-      "ERE [a6].[v2] < [a0].[created]))) AND (NOT (([a0].[pid] = :5))) AND (["
-      "a0].[creator] IS NOT NULL AND ([a0].[creator] = :6)) AND (NULL IS NOT "
-      "NULL) AND EXISTS (SELECT NULL FROM [s1].[t2_e] [a7] JOIN [s1].[t2_n] ["
-      "a8] ON [a8].[rid] = [a7].[rid] WHERE (([a7].[rid] IN (SELECT [a9].[ent"
-      "] FROM [s1].[t2_c0] [a9] WHERE [a9].[v1] = [a0].[pid])) AND EXISTS (SE"
-      "LECT NULL FROM [s1].[t2_c0] [a10] JOIN [s1].[t1_c2] [a11] ON [a11].[en"
-      "t] = [a0].[rid] WHERE [a10].[ent] = [a7].[rid] AND [a10].[v0] = [a11]."
-      "[v0])))) ORDER BY [a2].[v1] DESC NULLS LAST, [a0].[creator] NULLS FIRS"
-      "T, [a0].[rid] LIMIT :7 OFFSET :8"), f.text[1]);
+      "SELECT [a0].[rid], [a0].[pid] FROM [s1].[t1_e] [a0] JOIN [s1].[t1_n] [a1"
+      "] ON [a1].[rid] = [a0].[rid] LEFT JOIN [s1].[t1_c0] [a2] ON [a2].[ent] ="
+      " [a0].[rid] AND [a2].[lang] = :1 WHERE (([a0].[rid] IN (SELECT [a3].[ent"
+      "] FROM [s1].[t1_c0] [a3] WHERE [a3].[lang] = :2 AND ([a3].[v0] = :3))) A"
+      "ND ([a0].[rid] IN (SELECT [a4].[ent] FROM [s1].[t1_c3] [a4] WHERE [a4].["
+      "lang] = :4 AND ([a4].[v0] > :5))) AND ([a0].[rid] IN (SELECT [a5].[ent] "
+      "FROM [s1].[t1_c1] [a5] WHERE [a5].[lang] = :6 AND [a5].[v0] IN (:7, :8))"
+      ") AND (NOT ([a0].[rid] IN (SELECT [a6].[ent] FROM [s1].[t1_c0] [a6] WHER"
+      "E [a6].[lang] = :9 AND [a6].[v2] < [a0].[created]))) AND (NOT (([a0].[pi"
+      "d] = :10))) AND ([a0].[creator] IS NOT NULL AND ([a0].[creator] = :11)) "
+      "AND (NULL IS NOT NULL) AND EXISTS (SELECT NULL FROM [s1].[t2_e] [a7] JOI"
+      "N [s1].[t2_n] [a8] ON [a8].[rid] = [a7].[rid] WHERE (([a7].[rid] IN (SEL"
+      "ECT [a9].[ent] FROM [s1].[t2_c0] [a9] WHERE [a9].[lang] = :12 AND [a9].["
+      "v1] = [a0].[pid])) AND EXISTS (SELECT NULL FROM [s1].[t2_c0] [a10] JOIN "
+      "[s1].[t1_c2] [a11] ON [a11].[ent] = [a0].[rid] AND [a11].[lang] = :13 WH"
+      "ERE [a10].[ent] = [a7].[rid] AND [a10].[lang] = :14 AND [a10].[v0] = [a1"
+      "1].[v0])))) ORDER BY [a2].[v1] DESC NULLS LAST, [a0].[creator] NULLS FIR"
+      "ST, [a0].[rid] LIMIT :15 OFFSET :16"), f.text[1]);
   /* The same parameters in the same order: only the words differ. */
   ASSERT_EQ(c.binds[1].size(), f.binds[1].size());
-  ASSERT_EQ(8u, c.binds[1].size());
+  ASSERT_EQ(16u, c.binds[1].size());
   for (size_t i = 0; i < c.binds[1].size(); i++) {
     EXPECT_EQ(c.binds[1][i].kind, f.binds[1][i].kind);
     EXPECT_EQ(c.binds[1][i].integer, f.binds[1][i].integer);
   }
-  EXPECT_EQ(GDEFSSQL_DATUM_TEXT, c.binds[1][0].kind);
-  EXPECT_EQ(500, c.binds[1][1].integer);
-  EXPECT_EQ(10, c.binds[1][6].integer);
-  EXPECT_EQ(5, c.binds[1][7].integer);
+  /* The query's language, bound wherever a current table is read: the
+   * sort's join first, then before each field's comparison. */
+  for (size_t k : {0u, 1u, 3u, 5u, 8u, 11u, 12u, 13u}) {
+    EXPECT_EQ(GDEFSSQL_DATUM_TEXT, c.binds[1][k].kind) << k;
+    EXPECT_EQ("en", std::string(reinterpret_cast<const char *>(
+        c.binds[1][k].bytes), c.binds[1][k].len)) << k;
+  }
+  EXPECT_EQ(GDEFSSQL_DATUM_TEXT, c.binds[1][2].kind);
+  EXPECT_EQ(500, c.binds[1][4].integer);
+  EXPECT_EQ(10, c.binds[1][14].integer);
+  EXPECT_EQ(5, c.binds[1][15].integer);
   /* The total is the same predicate with no order and no page. */
   std::string page = c.text[1];
   std::string where = page.substr(page.find(" WHERE "), page.find(" ORDER BY ") -
       page.find(" WHERE "));
   EXPECT_EQ("SELECT COUNT(*) FROM \"t1_e\" \"a0\" JOIN \"t1_n\" \"a1\" ON "
             "\"a1\".\"rid\" = \"a0\".\"rid\"" + where, c.text[0]);
-  EXPECT_EQ(6u, c.binds[0].size());
+  EXPECT_EQ(13u, c.binds[0].size());
 }
 
 /* Every constant of a random query is a parameter: the text lexes in the
@@ -512,7 +528,7 @@ TEST_F(Compile, MoreParametersThanTheEngineTakesIsALimit) {
   d.max_binds = 999;
   Open(d, false);
   std::vector<V> many;
-  for (int i = 0; i < 249; i++) {
+  for (int i = 0; i < 248; i++) {
     many.push_back(Txt("v" + std::to_string(i)));
   }
   Q b;
@@ -521,12 +537,13 @@ TEST_F(Compile, MoreParametersThanTheEngineTakesIsALimit) {
     four.push_back(b.Cmp(GDEFSTOR_QUERY_IN, b.FieldOp("number"), b.Vals(many)));
   }
   four.push_back(b.Cmp(GDEFSTOR_QUERY_IN, b.FieldOp("number"),
-      b.Vals({Txt("a"), Txt("b"), Txt("c")})));
+      b.Vals({Txt("a"), Txt("b")})));
   GDEFSTOR_Query q = Query(b.Op(GDEFSTOR_QUERY_OR, four));
   Planned p;
   PlanOf(rig.store, "shop.order", q, 0, p);
   GDEFSSQL_Compiled * out = nullptr;
-  /* The total takes 999 and fits; the page adds its two and does not. */
+  /* The total takes 999 (992 values, two more, and the language before each
+   * of the five comparisons) and fits; the page adds its two and does not. */
   EXPECT_EQ(GDEFSSQL_ERR_LIMIT, gdefssql_query_compile(&d, nullptr, &p.plan,
       p.tnos.data(), p.tnos.size(), nullptr, &out));
   p.plan.count_only = 1;

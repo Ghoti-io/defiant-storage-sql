@@ -55,7 +55,7 @@ typedef struct IndexDef {
   char index[GDEFSSQL_NAME_CAP];
   char table[GDEFSSQL_NAME_CAP];
   char col[GDEFSSQL_NAME_CAP];
-  const char * cols[2];
+  const char * cols[3];
   size_t ncols;
   int unique;
 } IndexDef;
@@ -66,14 +66,20 @@ static int index_of(uint32_t tno, uint32_t grp, uint32_t col, int role,
   memset(out, 0, sizeof *out);
   switch (role) {
   case GDEFSSQL_ROLE_INDEX:
-    /* What a filter on the field reads: matching current items, then their
-     * entity. */
+    /* What a filter on the field reads: the matching current items in the
+     * query's language, then their entity. An equality seeks (value,
+     * language), so it reads that language's entries and no other's. The
+     * value leads, not the language: an index that began with the language
+     * would offer the sort's join (`ent = ? AND lang = ?`) a covering search
+     * on the language alone, which SQLite takes in place of the key, a read
+     * of a whole language per entity (story S6a2, measured). */
     gdefssql_name_index(out->index, tno, role, grp, col);
     gdefssql_name_table(out->table, tno, GDEFSSQL_ROLE_CURRENT, grp);
     gdefssql_name_column(out->col, col, 0);
     out->cols[0] = out->col;
-    out->cols[1] = "ent";
-    out->ncols = 2;
+    out->cols[1] = "lang";
+    out->cols[2] = "ent";
+    out->ncols = 3;
     return 1;
   case GDEFSSQL_ROLE_SUBJECT_INDEX:
     /* "Everything about this person": every version naming the subject. */
@@ -606,7 +612,7 @@ static GDEFSTOR_Result type_tables(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
   static const ColDef r_cols[] = {{"rid", GDEFSSQL_COL_ID, 1},
       {"rev", GDEFSSQL_COL_ID, 1}, {"cseq", GDEFSSQL_COL_ID, 1},
       {"who", GDEFSSQL_COL_REFERENCE, 1}, {"at", GDEFSSQL_COL_DATETIME, 1},
-      {"why", GDEFSSQL_COL_TEXT, 1}};
+      {"why", GDEFSSQL_COL_TEXT, 1}, {"langs", GDEFSSQL_COL_TEXT, 1}};
   static const ColDef n_cols[] = {{"rid", GDEFSSQL_COL_ID, 1},
       {"pub", GDEFSSQL_COL_BOOLEAN, 1}, {"del", GDEFSSQL_COL_BOOLEAN, 1}};
   static const char * const rid_key[] = {"rid"};
@@ -620,7 +626,7 @@ static GDEFSTOR_Result type_tables(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
     size_t nkey;
   } t[4] = {{GDEFSSQL_ROLE_ENTITY, e_cols, 6, rid_key, 1},
       {GDEFSSQL_ROLE_STATE, s_cols, 6, seq_key, 2},
-      {GDEFSSQL_ROLE_REVISION, r_cols, 6, rev_key, 2},
+      {GDEFSSQL_ROLE_REVISION, r_cols, 7, rev_key, 2},
       {GDEFSSQL_ROLE_NOW, n_cols, 3, rid_key, 1}};
   size_t i;
   for (i = 0; i < 4; i++) {
@@ -660,7 +666,7 @@ static GDEFSTOR_Result blind_tables(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
       {"item", GDEFSSQL_COL_ID, 1}, {"vfrom", GDEFSSQL_COL_ID, 1},
       {"fld", GDEFSSQL_COL_ID, 1}, {"subject", GDEFSSQL_COL_REFERENCE, 1},
       {"mac", GDEFSSQL_COL_BYTES, 1}, {"kid", GDEFSSQL_COL_ID, 1},
-      {"norm", GDEFSSQL_COL_ID, 1}};
+      {"norm", GDEFSSQL_COL_ID, 1}, {"lang", GDEFSSQL_COL_TEXT, 1}};
   static const char * const b_key[] = {"ent", "item", "vfrom", "fld"};
   static const int roles[2] = {GDEFSSQL_ROLE_BLIND_INDEX,
       GDEFSSQL_ROLE_BLIND_SUBJECT};
@@ -669,7 +675,7 @@ static GDEFSTOR_Result blind_tables(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
   if (have(cat, 0, 0, GDEFSSQL_ROLE_BLIND) == NULL) {
     char name[GDEFSSQL_NAME_CAP];
     gdefssql_name_table(name, tno, GDEFSSQL_ROLE_BLIND, 0);
-    rc = create_table(c, name, b_cols, 8, b_key, 4);
+    rc = create_table(c, name, b_cols, 9, b_key, 4);
     if (rc == GDEFSTOR_OK) {
       rc = record(c, tno, 0, 0, GDEFSSQL_ROLE_BLIND, name, 0);
     }
@@ -708,15 +714,19 @@ static int kind_of(const Want * w) {
  * every column the declaration gives it, and record them. */
 static GDEFSTOR_Result group_tables(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
     const Plan * p, uint32_t tno, uint32_t g) {
+  /* Every row carries the language of its tree (story S6a2), as a column:
+   * the key leads with the entity and its language, so one language's
+   * items are read without the others'. */
   static const ColDef g_cols[] = {{"ent", GDEFSSQL_COL_ID, 1},
-      {"item", GDEFSSQL_COL_ID, 1}, {"vfrom", GDEFSSQL_COL_ID, 1},
-      {"vto", GDEFSSQL_COL_ID, 0}, {"parent", GDEFSSQL_COL_ID, 1},
-      {"ord", GDEFSSQL_COL_FLOAT, 1}};
-  static const ColDef c_cols[] = {{"ent", GDEFSSQL_COL_ID, 1},
-      {"item", GDEFSSQL_COL_ID, 1}, {"vfrom", GDEFSSQL_COL_ID, 1},
+      {"lang", GDEFSSQL_COL_TEXT, 1}, {"item", GDEFSSQL_COL_ID, 1},
+      {"vfrom", GDEFSSQL_COL_ID, 1}, {"vto", GDEFSSQL_COL_ID, 0},
       {"parent", GDEFSSQL_COL_ID, 1}, {"ord", GDEFSSQL_COL_FLOAT, 1}};
-  static const char * const g_key[] = {"ent", "item", "vfrom"};
-  static const char * const c_key[] = {"ent", "item"};
+  static const ColDef c_cols[] = {{"ent", GDEFSSQL_COL_ID, 1},
+      {"lang", GDEFSSQL_COL_TEXT, 1}, {"item", GDEFSSQL_COL_ID, 1},
+      {"vfrom", GDEFSSQL_COL_ID, 1}, {"parent", GDEFSSQL_COL_ID, 1},
+      {"ord", GDEFSSQL_COL_FLOAT, 1}};
+  static const char * const g_key[] = {"ent", "lang", "item", "vfrom"};
+  static const char * const c_key[] = {"ent", "lang", "item"};
   int pass;
   GDEFSTOR_Result rc = GDEFSTOR_OK;
   for (pass = 0; pass < 2 && rc == GDEFSTOR_OK; pass++) {
@@ -730,9 +740,9 @@ static GDEFSTOR_Result group_tables(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
     gdefssql_name_table(name, tno, role, g);
     gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
     if (pass == 0) {
-      create_open(&sb, name, g_cols, 6);
+      create_open(&sb, name, g_cols, 7);
     } else {
-      create_open(&sb, name, c_cols, 5);
+      create_open(&sb, name, c_cols, 6);
     }
     for (i = 0; i < p->ncols; i++) {
       if (p->cols[i].grp == g) {
@@ -741,9 +751,9 @@ static GDEFSTOR_Result group_tables(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
       }
     }
     if (pass == 0) {
-      create_close(&sb, g_key, 3);
+      create_close(&sb, g_key, 4);
     } else {
-      create_close(&sb, c_key, 2);
+      create_close(&sb, c_key, 3);
     }
     rc = gdefssql_cx_exec(c, &sb);
     gdefssql_sb_free(&sb);
@@ -845,7 +855,7 @@ GDEFSTOR_Result gdefssql_type_steps(GDEFSSQL_Cx * c, uint32_t tno,
     }
   }
   for (i = 0; rc == GDEFSTOR_OK && i < p.ngroups; i++) {
-    size_t n = 6;
+    size_t n = 7;
     size_t k;
     for (k = 0; k < p.ncols; k++) {
       if (p.cols[k].grp == p.groups[i]) {
