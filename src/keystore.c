@@ -257,8 +257,7 @@ static GDEFSTOR_Result tenant_init(Cx * c) {
   if (rc == GDEFSTOR_OK) {
     rc = create_table(c, "dsk_ledger", ledger_cols, 3, "subject");
   }
-  /* Sealed material and tenant secrets (story S5b). A key store made before
-   * them gains them here, at its first write in a backend's life. */
+  /* Sealed material and tenant secrets. */
   if (rc == GDEFSTOR_OK) {
     rc = create_table(c, "dsk_sealed", sealed_cols, 2, "subject");
   }

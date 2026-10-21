@@ -87,7 +87,7 @@
  * abort of a write that took a counter value rolls back to it, keeps the
  * counter's floor and commits only that (documentation/sql.md, "Counters and
  * aborts"). The first write of a tenant in a backend's life first
- * creates the six tenant tables in a transaction of their own (and, with
+ * creates the ten tenant tables in a transaction of their own (and, with
  * GDEFSSQL_Dialect::qualifier_create, the tenant's schema, first).
  *
  * ## Index builds
@@ -130,13 +130,14 @@ extern "C" {
 #endif
 
 /**
- * The layout version `dss_schema` records. A store holding another is refused.
- * 2 since the language axis (story S6a2): every item, current and blind row
- * holds its language and every revision row its languages, so a store of
- * layout 1 has a shape this library no longer reads and is refused as older
- * (::GDEFSTOR_ERR_FORMAT). Nothing was released, so nothing is migrated.
+ * The layout version `dss_schema` records, and the whole layout of it
+ * (documentation/sql.md): a store records it when its tables are made, and
+ * every later layout is a recorded step from it (AD-34: formats stay at 1
+ * until the suite's first release). A store holding another version is
+ * refused: a larger one as ::GDEFSTOR_ERR_UNSUPPORTED, any other as
+ * ::GDEFSTOR_ERR_FORMAT.
  */
-#define GDEFSSQL_SCHEMA_VERSION 2
+#define GDEFSSQL_SCHEMA_VERSION 1
 
 /**
  * @brief Make the entity backend for one engine.

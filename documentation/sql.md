@@ -1,9 +1,11 @@
 # The SQL layer
 
-**Status:** describes what shipped in story S2 (2026-10-18), with the key
-store and `gdefssql_store_version()` added in story S3, index builds
-outside the step, schemas made per tenant and `gdefssql_store_exists()` in
-story S4, and the language axis (layout version 2) in story S6a2.
+**Status:** describes layout version 1 as it stands after story S9
+(2026-10-20): the layout of stories S2 to S6c (the key store, index builds
+outside the step, schemas per tenant, records, counters and the outbox, the
+language axis, the blind table), made whole at version 1. Nothing is
+released, so every earlier shape was replaced in place (AD-34), and version
+1 is final: a later layout is a recorded step from it.
 
 This is the contract between `defiant-storage-sql` and the engine backends
 that sit on it. The port's meaning is `defiant-storage`'s
@@ -17,8 +19,8 @@ No identifier is built from caller text. Every identifier is one of:
 
 | Form | What |
 | --- | --- |
-| `dss_schema`, `dss_counter`, `dss_type`, `dss_name`, `dss_entity`, `dss_draft` | the six tenant tables |
-| `dss_record`, `dss_seq`, `dss_outbox`, `dss_outbox_id` | the tenant tables of records, counters and the outbox (story S6a) |
+| `dss_schema`, `dss_counter`, `dss_type`, `dss_name`, `dss_entity`, `dss_draft` | six of the ten tenant tables |
+| `dss_record`, `dss_seq`, `dss_outbox`, `dss_outbox_id` | the other four: records, counters and the outbox |
 | `dss_w` | the savepoint every write sets after its `BEGIN` |
 | `dss_type_tno`, `dss_entity_rid` | their unique indexes |
 | `tN_e`, `tN_s`, `tN_r`, `tN_n` | type N's entity, state, revision and newest-state tables |
@@ -60,7 +62,7 @@ Per tenant:
 
 | Table | Columns | Key |
 | --- | --- | --- |
-| `dss_schema` | `id`, `version` (2) | `id` |
+| `dss_schema` | `id`, `version` (1) | `id` |
 | `dss_counter` | `id`, `last_row`, `last_type`, `last_cseq` | `id` |
 | `dss_type` | `name` TEXT, `tno`, `decl` BYTES (the port's declaration text) | `name` |
 | `dss_name` | as above | `tno, grp, col, role` |
@@ -149,16 +151,15 @@ field is no longer indexed stays, and a column recorded with another kind than
 the declaration gives is `GDEFSTOR_ERR_CORRUPT`, never a conversion. A
 declaration that would exceed the dialect's column limit is
 `GDEFSTOR_ERR_LIMIT` before any DDL runs. The first write of a tenant in a
-backend's life creates the six tenant tables in a transaction of its own, then
-checks `dss_schema.version`: another version is refused
-(`GDEFSTOR_ERR_UNSUPPORTED` for a newer one, `GDEFSTOR_ERR_FORMAT` otherwise).
-The version is 2 since the language axis: a store of layout 1 has group,
-current, revision and blind tables without their language columns, and is
-refused as older. Nothing is migrated, because nothing was released.
-The four tables of story S6a are made in the same transaction and recorded
-(role 16) when their records are missing, so a store made before them gains
-them at its first write in a backend's life; a read of such a store before
-that write finds no table (the engine's error).
+backend's life creates the ten tenant tables (`IF NOT EXISTS`) in a
+transaction of its own, then checks `dss_schema.version`: another version is
+refused (`GDEFSTOR_ERR_UNSUPPORTED` for a newer one, `GDEFSTOR_ERR_FORMAT`
+otherwise). A store that records no version is new: that transaction
+records version 1, the four tables of records, counters and the outbox
+(role 16) and the two tenant indexes, pending. That is the whole of version
+1; nothing is added to a store that already records it. The migration corpus
+gate (`defiant-storage-sqlite`, `testMigration`) holds every step taken on a
+committed version-1 store to keeping every row it holds.
 
 The steps of a declaration run inside the write that declares it, so a dialect
 must have transactional DDL (SQLite and Postgres do). A dialect without it is
@@ -198,9 +199,8 @@ answer exactly the same, by reading the table.
 The blind table is a step of the first declaration of the type that has a
 personal field: the table in the declaring write, recorded (role 13), and its
 two indexes recorded pending (roles 14 and 15) and built after it, like every
-other. A type declared before the blind table existed gets it when its
-declaration next changes; until then a save with a MAC on it is
-`GDEFSTOR_ERR_UNSUPPORTED`. The table is an additive step.
+other. A type that gains its first personal field in a later declaration
+gets the table in that declaration's step. The table is an additive step.
 
 The key store (section 8) is a port of its own: its one index,
 `dsk_ledger_seq`, is made with its table in the key store's first
@@ -391,9 +391,8 @@ What S3 (SQLite) and S4 (Postgres) supply, and what they must know:
   exists calls `gdefssql_store_version()` on each new connection, before
   `open` returns it, and refuses another version; the call is one `SELECT`
   through the executor itself. A store this library did not make (SQLite: a
-  milestone-1 file, with `defiant_record` and no `dss_schema`) is the
-  executor's to recognise from the catalog and refuse, before anything here
-  can create a table in it. An executor whose missing store is a schema, not
+  file with tables and no `dss_schema`) is the executor's to recognise from
+  the catalog and refuse, before anything here can create a table in it. An executor whose missing store is a schema, not
   a file, calls `gdefssql_store_exists()` in `open` (the dialect's
   `store_exists`, one `SELECT`) to answer a read of a tenant with no store
   with no connection, as executor.h asks; a schema that holds tables but not
@@ -402,8 +401,7 @@ What S3 (SQLite) and S4 (Postgres) supply, and what they must know:
   transaction, and may wait (a concurrent build waits for older
   transactions): the executor's session settings (Postgres: `lock_timeout`)
   bound that wait, and a build that gives up only leaves its index pending.
-- **Not here:** blind indexes (S5), content-hash values (AD-14, later), and
-  the old key/bytes tables (the backends keep them until S9).
+- **Not here:** content-hash values (AD-14, later).
 
 ## 8. The key store
 
@@ -441,5 +439,3 @@ each commit; Postgres's dialect sets `key_vacuum` to `VACUUM (FULL) `, which
 writes the table anew. Neither reaches a write-ahead log already archived:
 expiring those archives is the operator's.
 
-A key store made before `dsk_sealed` and `dsk_secret` existed gains them at
-its first write in a backend's life; its `dsk_schema.version` stays 1.

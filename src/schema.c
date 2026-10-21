@@ -21,7 +21,7 @@
 /**
  * @file
  *
- * The physical schema: the six tenant tables, and the additive steps a
+ * The physical schema: the ten tenant tables, and the additive steps a
  * declaration needs (backend.h, "The physical schema").
  *
  * A step creates a table, adds a nullable column or creates an index, and
@@ -286,6 +286,7 @@ GDEFSTOR_Result gdefssql_tenant_init(GDEFSSQL_Cx * c) {
   GDEFSTOR_Result rc = GDEFSTOR_OK;
   int64_t v = 0;
   int found = 0;
+  int fresh = 0;
   if (c->qual != NULL && c->b->d.qualifier_create != NULL) {
     /* The tenant's schema, in the same transaction as its tables: a failure
      * leaves neither, never a schema that holds no store. */
@@ -334,7 +335,11 @@ GDEFSTOR_Result gdefssql_tenant_init(GDEFSSQL_Cx * c) {
     return v > GDEFSSQL_SCHEMA_VERSION ? GDEFSTOR_ERR_UNSUPPORTED
                                        : GDEFSTOR_ERR_FORMAT;
   }
-  if (rc == GDEFSTOR_OK && !found) {
+  /* Version 1 is the whole layout: a store that records it has every table
+   * and every record below, made with it, and nothing is ever added to it
+   * here. */
+  fresh = rc == GDEFSTOR_OK && !found;
+  if (fresh) {
     GDEFSSQL_Sb sb;
     gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
     gdefssql_sb_kw(&sb, "INSERT INTO ");
@@ -375,31 +380,21 @@ GDEFSTOR_Result gdefssql_tenant_init(GDEFSSQL_Cx * c) {
     rc = gdefssql_cx_run(c, &sb);
     gdefssql_sb_free(&sb);
   }
-  if (rc == GDEFSTOR_OK) {
+  if (rc == GDEFSTOR_OK && fresh) {
     /* The tenant tables' two indexes are steps like any other: recorded
-     * here, built after this transaction commits (AD-15). */
+     * here, built after this transaction commits (AD-15). The four tables of
+     * records, counters and the outbox are recorded beside them. */
     static const char * const names[2] = {"dss_type_tno", "dss_entity_rid"};
-    GDEFSSQL_Cat cat;
+    static const char * const sys[4] = {"dss_record", "dss_seq", "dss_outbox",
+        "dss_outbox_id"};
     uint32_t k;
-    rc = gdefssql_cat_load(c, 0, &cat);
     for (k = 0; rc == GDEFSTOR_OK && k < 2; k++) {
-      if (have(&cat, 0, k, GDEFSSQL_ROLE_TENANT_INDEX) == NULL) {
-        rc = record(c, 0, 0, k, GDEFSSQL_ROLE_TENANT_INDEX, names[k],
-            GDEFSSQL_KIND_PENDING);
-      }
+      rc = record(c, 0, 0, k, GDEFSSQL_ROLE_TENANT_INDEX, names[k],
+          GDEFSSQL_KIND_PENDING);
     }
-    /* The tables of story S6a are steps too: a store made before them gets
-     * them, and their records, at its next first write. */
-    {
-      static const char * const sys[4] = {"dss_record", "dss_seq",
-          "dss_outbox", "dss_outbox_id"};
-      for (k = 0; rc == GDEFSTOR_OK && k < 4; k++) {
-        if (have(&cat, 0, k, GDEFSSQL_ROLE_SYSTEM) == NULL) {
-          rc = record(c, 0, 0, k, GDEFSSQL_ROLE_SYSTEM, sys[k], 0);
-        }
-      }
+    for (k = 0; rc == GDEFSTOR_OK && k < 4; k++) {
+      rc = record(c, 0, 0, k, GDEFSSQL_ROLE_SYSTEM, sys[k], 0);
     }
-    gdefssql_cat_free(&cat); /* zeroed by a failed load: freeing is safe */
   }
   return rc;
 }

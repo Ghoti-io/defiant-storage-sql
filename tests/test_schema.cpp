@@ -449,6 +449,10 @@ TEST_F(Schema, AStoreOfAnotherLayoutIsRefused) {
   /* What a newer binary would have written. */
   auto & rows = rig.engine->stores[kTenant].committed.tables["dss_schema"]->rows;
   ASSERT_EQ(1u, rows.size());
+  /* A new store records version 1 (AD-34: formats stay at 1 until the first
+   * release). */
+  EXPECT_EQ(1, rows[0][1].i);
+  EXPECT_EQ(1, GDEFSSQL_SCHEMA_VERSION);
   rows[0][1] = sqlstub::Val::Int(GDEFSSQL_SCHEMA_VERSION + 1);
   /* A backend that has not seen this tenant reads the version first. */
   GDEFSSQL_Dialect d = sqlstub::StdDialect();
@@ -862,9 +866,9 @@ TEST(Dialect, CheckRefusesWhatCouldCorruptTheText) {
   EXPECT_EQ(GDEFSSQL_ERR_INVALID, gdefssql_dialect_check(nullptr));
 }
 
-/* Story S6a: records, counters and the outbox are four tenant tables, each a
- * step recorded in dss_name (role 16) like every other, made by the tenant's
- * first write and never by a declaration. */
+/* Records, counters and the outbox are four tenant tables, each recorded in
+ * dss_name (role 16) like every other table, made with the store and never by
+ * a declaration. */
 TEST_F(Schema, TheSystemTablesAreRecordedStepsOfTheTenant) {
   Open(sqlstub::StdDialect());
   ASSERT_EQ(GDEFSTOR_OK, InWrite(rig.store, [](GDEFSTOR_Write * w) {
