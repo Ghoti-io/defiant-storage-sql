@@ -86,10 +86,8 @@ TEST_F(Schema, ANestedDeclarationYieldsTheDocumentedTables) {
   const char * const want[] = {
       "CREATE TABLE IF NOT EXISTS \"t2_e\" (\"rid\" INTEGER NOT NULL, \"pid\" TEXT NOT NULL, \"creator\" TEXT, \"created\" INTEGER NOT NULL, \"rev\" INTEGER NOT NULL, \"last_item\" INTEGER NOT NULL, PRIMARY KEY (\"rid\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_s\" (\"rid\" INTEGER NOT NULL, \"seq\" INTEGER NOT NULL, \"pub\" INTEGER NOT NULL, \"del\" INTEGER NOT NULL, \"actor\" TEXT NOT NULL, \"at\" INTEGER NOT NULL, PRIMARY KEY (\"rid\", \"seq\"))",
-      "CREATE TABLE IF NOT EXISTS \"t2_r\" (\"rid\" INTEGER NOT NULL, \"rev\" INTEGER NOT NULL, \"cseq\" INTEGER NOT NULL, \"who\" TEXT NOT NULL, \"at\" INTEGER NOT NULL, \"why\" TEXT NOT NULL, \"langs\" TEXT NOT NULL, PRIMARY KEY (\"rid\", \"rev\"))",
+      "CREATE TABLE IF NOT EXISTS \"t2_r\" (\"rid\" INTEGER NOT NULL, \"rev\" INTEGER NOT NULL, \"cseq\" INTEGER NOT NULL, \"who\" TEXT NOT NULL, \"at\" INTEGER NOT NULL, \"why\" TEXT NOT NULL, \"langs\" TEXT NOT NULL, \"stamp\" TEXT NOT NULL, PRIMARY KEY (\"rid\", \"rev\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_n\" (\"rid\" INTEGER NOT NULL, \"pub\" INTEGER NOT NULL, \"del\" INTEGER NOT NULL, PRIMARY KEY (\"rid\"))",
-      /* The schema stamp of every revision: the step from version 1. */
-      "ALTER TABLE \"t2_r\" ADD COLUMN \"stamp\" TEXT",
       "CREATE TABLE IF NOT EXISTS \"t2_g0\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" INTEGER, \"v3\" TEXT, \"v4\" BLOB, \"v4s\" TEXT, PRIMARY KEY (\"ent\", \"lang\", \"item\", \"vfrom\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_c0\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" INTEGER, \"v3\" TEXT, \"v4\" BLOB, \"v4s\" TEXT, PRIMARY KEY (\"ent\", \"lang\", \"item\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_g1\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, PRIMARY KEY (\"ent\", \"lang\", \"item\", \"vfrom\"))",

@@ -77,12 +77,9 @@
  * an index, and each is recorded in `dss_name`, so a step already taken is
  * never taken again (documentation/sql.md has every column and index).
  *
- * The layout is at version 1, and version 1 is final (AD-34): what a later
- * layout adds is such a step, taken on a store that may already hold data.
- * The first is the schema stamp (model.h): the nullable column `stamp` of
- * `dss_record`, `dss_draft` and every `tN_r`, recorded in `dss_name`. A store
- * this library made before it takes it the first time a backend reads or
- * writes the tenant, and the rows it held then read with no stamp.
+ * The layout is at version 1 (AD-34). Every revision, draft and record row
+ * holds its schema stamp (model.h) in the column `stamp`, part of that
+ * layout.
  *
  * ## Transactions
  *

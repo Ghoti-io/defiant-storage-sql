@@ -443,7 +443,7 @@ GDEFSTOR_Result gdefssql_cat_load(GDEFSSQL_Cx * c, uint32_t tno,
     }
     if (v[0] < 0 || v[0] > (int64_t)UINT32_MAX || v[1] < 0 ||
         v[1] > (int64_t)UINT32_MAX || v[2] < GDEFSSQL_ROLE_ENTITY ||
-        v[2] > GDEFSSQL_ROLE_STAMP || v[3] < 0 || v[3] > 0xffff) {
+        v[2] > GDEFSSQL_ROLE_SYSTEM || v[3] < 0 || v[3] > 0xffff) {
       rc = GDEFSTOR_ERR_CORRUPT;
       break;
     }

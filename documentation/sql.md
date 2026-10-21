@@ -108,14 +108,9 @@ A MAC is in this table and in no other: never a column of `tN_gG`, `tN_cG` or
 
 **Schema stamps (story S11).** `stamp` holds the schema stamp of a revision,
 a draft or a record (model.h, `<component>/<version>`), exactly as the port
-gave it. It is the first step from version 1, which stays final (AD-34): the
-nullable column added to `dss_record` and `dss_draft` (recorded as `dss_name`
-role 17, tno 0, col 0 and 1) and to each `tN_r` (role 17, tno N, col 0), by
-`ALTER TABLE ... ADD COLUMN`, in the transaction that records it. A new store
-takes it as it makes the tables; a store made before it takes it the first
-time a backend reads or writes the tenant (a read lays out the tenant in a
-transaction of its own and leaves the index sweep to the first write), and
-its earlier rows read with no stamp.
+gave it, in every `tN_r`, `dss_draft` and `dss_record` row. It is part of the
+version-1 layout (AD-34: a layout changes in place until the first release),
+never a step from it.
 
 **Languages (story S6a2).** Every item version, current item and blind row
 holds the language of its tree in `lang` (TEXT, with the dialect's
