@@ -75,12 +75,21 @@ relies on an order it did not ask for answers wrongly.
 - `testKeystore`: the port's key store conformance suite (`keystore.inc`) on
   `gdefssql_keystore_backend()`, what its tables hold after an erasure, both
   dialects, and `gdefssql_store_version()`.
+- `testBlind`: the blind table as this library lays it out, read from the
+  test engine's own tables: a recorded schema step with its indexes built
+  outside the step, a MAC in no other table, and each lookup reading its own
+  columns.
+- `testCore`: every result code has a string and maps to and from the port's
+  result of the same name.
 
-`make test` also runs `check-sql`, which plants each defect the story names (an
+`make test` also runs `check-sql`, which plants 31 defects (among them an
 unvalidated identifier, a concatenated value, a dropped WHERE clause, a
-non-additive step, count after limit, the tiebreak removed, NULL order
-flipped, plus a `valid_to` written twice, a current table left stale, and an
-erasure that keeps the key or writes no ledger row) in a
+non-additive step, an index built inside a step, count after limit, the
+tiebreak removed, NULL order flipped, a `valid_to` written twice, a current
+table left stale, an erasure that keeps the key or writes no ledger row, a
+MAC in a revision row, a blind row kept beside the one put back, a record
+written outside its transaction, a counter that reuses an aborted value, an
+outbox claim out of order, and a query that reads another language) in a
 scratch copy of the source and requires a named test to fail for each;
 `check-labels`, `check-seams` and `check-symbols`, each with plants of its own.
 
@@ -88,4 +97,5 @@ scratch copy of the source and requires a named test to fail for each;
 
 Built in story S2 of the storage rewrite; the key store backend and
 `gdefssql_store_version()` were added in S3, with the SQLite backend that
-uses them. The Postgres backend (S4) is not built yet.
+uses them, and the Postgres backend (`defiant-storage-postgres`, S4) is the
+second engine on it. The schema is at version 1 (`GDEFSSQL_SCHEMA_VERSION`).
