@@ -1989,100 +1989,6 @@ inline GDEFSSQL_Executor ExecutorOf(Engine * e) {
   return x;
 }
 
-/* ---- a key/bytes backend the store needs beside the entity port ---------- */
-
-struct KvStore {
-  const GDEFSTOR_Allocator * alloc = nullptr; /* the store's: it frees what get returns */
-  std::map<std::string, std::string> rows;
-};
-
-inline std::string KvKey(const char * t, size_t tl, const char * k, size_t kl) {
-  return std::string(t, tl) + '\0' + std::string(k, kl);
-}
-
-inline GDEFSTOR_Result Kv_put(void * ctx, const char * t, size_t tl,
-    const char * k, size_t kl, const uint8_t * b, size_t n) {
-  ((KvStore *)ctx)->rows[KvKey(t, tl, k, kl)] = std::string((const char *)b, n);
-  return GDEFSTOR_OK;
-}
-
-inline GDEFSTOR_Result Kv_get(void * ctx, const char * t, size_t tl,
-    const char * k, size_t kl, uint8_t ** out, size_t * out_len) {
-  auto & rows = ((KvStore *)ctx)->rows;
-  auto it = rows.find(KvKey(t, tl, k, kl));
-  if (it == rows.end()) {
-    return GDEFSTOR_ERR_INVALID;
-  }
-  uint8_t * c = (uint8_t *)gcu_allocator_malloc(((KvStore *)ctx)->alloc,
-      it->second.size() + 1);
-  if (c == nullptr) {
-    return GDEFSTOR_ERR_OOM;
-  }
-  std::memcpy(c, it->second.data(), it->second.size());
-  *out = c;
-  *out_len = it->second.size();
-  return GDEFSTOR_OK;
-}
-
-inline GDEFSTOR_Result Kv_remove(void * ctx, const char * t, size_t tl,
-    const char * k, size_t kl) {
-  ((KvStore *)ctx)->rows.erase(KvKey(t, tl, k, kl));
-  return GDEFSTOR_OK;
-}
-
-inline GDEFSTOR_Result Kv_list(void * ctx, const char * t, size_t tl,
-    const char * prefix, size_t pl, char *** out_keys, size_t ** out_lens,
-    size_t * out_count) {
-  auto & rows = ((KvStore *)ctx)->rows;
-  const GDEFSTOR_Allocator * a = ((KvStore *)ctx)->alloc;
-  std::string head = std::string(t, tl) + '\0';
-  std::vector<std::string> keys;
-  for (const auto & r : rows) {
-    if (r.first.compare(0, head.size(), head) == 0) {
-      std::string k = r.first.substr(head.size());
-      if (k.compare(0, pl, std::string(prefix, pl)) == 0) {
-        keys.push_back(k);
-      }
-    }
-  }
-  *out_count = keys.size();
-  *out_keys = (char **)gcu_allocator_malloc(a, (keys.size() + 1) * sizeof(char *));
-  *out_lens = (size_t *)gcu_allocator_malloc(a, (keys.size() + 1) * sizeof(size_t));
-  if (*out_keys == nullptr || *out_lens == nullptr) {
-    gcu_allocator_free(a, *out_keys);
-    gcu_allocator_free(a, *out_lens);
-    return GDEFSTOR_ERR_OOM;
-  }
-  for (size_t i = 0; i < keys.size(); i++) {
-    (*out_keys)[i] = (char *)gcu_allocator_malloc(a, keys[i].size() + 1);
-    if ((*out_keys)[i] == nullptr) {
-      return GDEFSTOR_ERR_OOM;
-    }
-    std::memcpy((*out_keys)[i], keys[i].data(), keys[i].size());
-    (*out_keys)[i][keys[i].size()] = '\0';
-    (*out_lens)[i] = keys[i].size();
-  }
-  return GDEFSTOR_OK;
-}
-
-inline void Kv_destroy(void * ctx) {
-  delete (KvStore *)ctx;
-}
-
-inline GDEFSTOR_Backend KvBackend(const GDEFSTOR_Allocator * alloc) {
-  GDEFSTOR_Backend b;
-  KvStore * kv = new KvStore();
-  kv->alloc = alloc;
-  std::memset(&b, 0, sizeof b);
-  b.ctx = kv;
-  b.destroy = Kv_destroy;
-  b.put = Kv_put;
-  b.get = Kv_get;
-  b.remove = Kv_remove;
-  b.list = Kv_list;
-  return b;
-}
-
 /* ---- the tee: every query also answered by the reference scan ------------ */
 
 struct Tee {
@@ -2413,11 +2319,8 @@ inline GDEFSTOR_Result OpenRig(Rig & r, const GDEFSSQL_Dialect & d,
     return gdefssql_result_to_port(rc);
   }
   GDEFSTOR_ModelBackend tee = TeeOf(&r.tee, r.model);
-  GDEFSTOR_Backend kv = KvBackend(alloc);
-  GDEFSTOR_Result prc = gdefstor_store_create_model(&kv, &tee, alloc, nullptr,
-      &r.store);
+  GDEFSTOR_Result prc = gdefstor_store_open(&tee, alloc, nullptr, &r.store);
   if (prc != GDEFSTOR_OK) {
-    kv.destroy(kv.ctx);
     r.model.destroy(r.model.ctx);
   }
   return prc;

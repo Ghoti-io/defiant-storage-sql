@@ -22,7 +22,7 @@ database apart from every data store.
 GDEFSTOR_ModelBackend model;
 GDEFSSQL_Result rc = gdefssql_model_backend(&my_dialect, &my_executor,
     NULL, &model);
-/* then gdefstor_store_create_model(&key_bytes_backend, &model, ...) */
+/* then gdefstor_store_open(&model, ...) */
 ```
 
 Nothing a caller wrote reaches SQL text: every table and column is a generated

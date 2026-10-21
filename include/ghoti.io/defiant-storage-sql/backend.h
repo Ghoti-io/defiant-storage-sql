@@ -148,7 +148,7 @@ extern "C" {
  *   taken.
  * @param allocator NULL uses the default. It must be the allocator the store
  *   is created with: the port frees what `type_load` returns with it.
- * @param out Receives the backend, to hand to gdefstor_store_create_model().
+ * @param out Receives the backend, to hand to gdefstor_store_open().
  * @return ::GDEFSSQL_OK, ::GDEFSSQL_ERR_INVALID (a dialect or an executor that
  *   is incomplete), ::GDEFSSQL_ERR_UNSUPPORTED (a dialect without
  *   transactional DDL), or ::GDEFSSQL_ERR_OOM.
