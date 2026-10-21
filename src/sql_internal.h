@@ -94,7 +94,10 @@ enum {
   GDEFSSQL_ROLE_BLIND_SUBJECT = 15, /* tN_bs on tN_b (subject) */
   /* tno 0: the tenant tables of story S6a, col 0 dss_record, col 1 dss_seq,
    * col 2 dss_outbox, col 3 dss_outbox_id */
-  GDEFSSQL_ROLE_SYSTEM = 16
+  GDEFSSQL_ROLE_SYSTEM = 16,
+  /* The schema stamp column `stamp` (model.h), a step from version 1: tno
+   * 0 col 0 of dss_record and col 1 of dss_draft; tno N col 0 of tN_r. */
+  GDEFSSQL_ROLE_STAMP = 17
 };
 
 /* dss_name.kind of a VALUE column: the field's logical type, plus this bit

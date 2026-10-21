@@ -31,7 +31,7 @@ No identifier is built from caller text. Every identifier is one of:
 | `tN_b` | type N's blind table (AD-14), for a type with a personal field |
 | `tN_bm`, `tN_bs` | indexes on `tN_b (fld, mac)` and `tN_b (subject)` |
 | `vC`, `vCs` | column C of a group, and its subject column |
-| fixed column names | `rid pid creator created rev last_item seq pub del actor at cseq who why langs ent lang item vfrom vto parent ord id version last_row last_type last_cseq name tno decl grp col role kind type base body fld subject mac kid norm ns rkey last kept stream fmt lease fails parked` |
+| fixed column names | `rid pid creator created rev last_item seq pub del actor at cseq who why langs stamp ent lang item vfrom vto parent ord id version last_row last_type last_cseq name tno decl grp col role kind type base body fld subject mac kid norm ns rkey last kept stream fmt lease fails parked` |
 | `aK` | a table alias in one statement |
 | `dsk_schema`, `dsk_counter`, `dsk_key`, `dsk_ledger`, `dsk_sealed`, `dsk_secret`, `dsk_ledger_seq` | the key store's tables and index (section 8), never in a data store |
 | `subject secret last_seq` | the key store's column names |
@@ -67,8 +67,8 @@ Per tenant:
 | `dss_type` | `name` TEXT, `tno`, `decl` BYTES (the port's declaration text) | `name` |
 | `dss_name` | as above | `tno, grp, col, role` |
 | `dss_entity` | `pid` REFERENCE, `rid`, `tno` (derived) | `pid` |
-| `dss_draft` | `pid` REFERENCE, `type` TEXT, `base`, `body` BYTES | `pid` |
-| `dss_record` | `ns` TEXT, `rkey` TEXT, `body` BYTES: a record (model.h) | `ns, rkey` |
+| `dss_draft` | `pid` REFERENCE, `type` TEXT, `base`, `body` BYTES, `stamp` TEXT | `pid` |
+| `dss_record` | `ns` TEXT, `rkey` TEXT, `body` BYTES, `stamp` TEXT: a record (model.h) | `ns, rkey` |
 | `dss_seq` | `kind` (1 a counter, 2 an outbox stream), `name` TEXT, `last` (the committed value), `kept` (the counter's floor) | `kind, name` |
 | `dss_outbox` | `stream` TEXT, `seq`, `pid` REFERENCE, `fmt` TEXT, `body` BYTES, `lease` (ms, 0 never claimed), `fails`, `parked` BOOLEAN | `stream, seq` |
 | `dss_outbox_id` | `pid` REFERENCE, `stream` TEXT, `seq`: each outbox row by public id | `pid` |
@@ -85,7 +85,7 @@ Per type N, truth:
 | --- | --- | --- |
 | `tN_e` | `rid`, `pid`, `creator` (NULL for the system), `created`, `rev` (highest), `last_item` | `rid` |
 | `tN_s` | `rid`, `seq`, `pub`, `del`, `actor`, `at` | `rid, seq` |
-| `tN_r` | `rid`, `rev`, `cseq`, `who`, `at`, `why`, `langs` (the languages it changed, `de,fr`) | `rid, rev` |
+| `tN_r` | `rid`, `rev`, `cseq`, `who`, `at`, `why`, `langs` (the languages it changed, `de,fr`), `stamp` TEXT | `rid, rev` |
 | `tN_gG` | `ent`, `lang`, `item`, `vfrom`, `vto` (NULL while open), `parent`, `ord`, `vC`... | `ent, lang, item, vfrom` |
 
 and derived, written in the same transaction and rebuilt from the truth by
@@ -105,6 +105,17 @@ table, which is truth while its subject exists and is not rebuilt:
 
 A MAC is in this table and in no other: never a column of `tN_gG`, `tN_cG` or
 `tN_r`.
+
+**Schema stamps (story S11).** `stamp` holds the schema stamp of a revision,
+a draft or a record (model.h, `<component>/<version>`), exactly as the port
+gave it. It is the first step from version 1, which stays final (AD-34): the
+nullable column added to `dss_record` and `dss_draft` (recorded as `dss_name`
+role 17, tno 0, col 0 and 1) and to each `tN_r` (role 17, tno N, col 0), by
+`ALTER TABLE ... ADD COLUMN`, in the transaction that records it. A new store
+takes it as it makes the tables; a store made before it takes it the first
+time a backend reads or writes the tenant (a read lays out the tenant in a
+transaction of its own and leaves the index sweep to the first write), and
+its earlier rows read with no stamp.
 
 **Languages (story S6a2).** Every item version, current item and blind row
 holds the language of its tree in `lang` (TEXT, with the dialect's

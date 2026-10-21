@@ -31,6 +31,12 @@
  * record exists is not taken, so declaring the same tree twice runs no DDL.
  * Tables and indexes are also written IF NOT EXISTS.
  *
+ * Version 1 is final (AD-34): what a later layout adds is such a step,
+ * taken on a store that already holds data. The schema stamp column of the
+ * records, the drafts and every type's revisions is the first (stamp_step()):
+ * a store made by version 1 without it takes it the first time it is used,
+ * and the rows it held then read with no stamp.
+ *
  * An index is the exception to "in the same transaction" (AD-15): its step
  * only records it, as pending, and gdefssql_index_sweep() builds it after the
  * step's transaction commits, outside any transaction, and then marks it
@@ -46,6 +52,9 @@
 
 static GDEFSTOR_Result record(GDEFSSQL_Cx * c, uint32_t tno, uint32_t grp,
     uint32_t col, int role, const char * name, int kind);
+static GDEFSTOR_Result stamp_step(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
+    uint32_t tno, uint32_t col, const char * table);
+static GDEFSTOR_Result stamp_types(GDEFSSQL_Cx * c);
 static const GDEFSSQL_CatRow * have(const GDEFSSQL_Cat * cat, uint32_t grp,
     uint32_t col, int role);
 
@@ -335,9 +344,9 @@ GDEFSTOR_Result gdefssql_tenant_init(GDEFSSQL_Cx * c) {
     return v > GDEFSSQL_SCHEMA_VERSION ? GDEFSTOR_ERR_UNSUPPORTED
                                        : GDEFSTOR_ERR_FORMAT;
   }
-  /* Version 1 is the whole layout: a store that records it has every table
-   * and every record below, made with it, and nothing is ever added to it
-   * here. */
+  /* Version 1 is the layout every store starts from: a store that records
+   * it has every table and every record below, made with it. What a later
+   * layout adds is a step taken after (below), never a second version. */
   fresh = rc == GDEFSTOR_OK && !found;
   if (fresh) {
     GDEFSSQL_Sb sb;
@@ -395,6 +404,23 @@ GDEFSTOR_Result gdefssql_tenant_init(GDEFSSQL_Cx * c) {
     for (k = 0; rc == GDEFSTOR_OK && k < 4; k++) {
       rc = record(c, 0, 0, k, GDEFSSQL_ROLE_SYSTEM, sys[k], 0);
     }
+  }
+  if (rc == GDEFSTOR_OK) {
+    /* The steps from version 1, which a store version 1 made without them
+     * takes here, on its first use: the schema stamp of records and drafts,
+     * and of every declared type's revisions. */
+    GDEFSSQL_Cat cat;
+    rc = gdefssql_cat_load(c, 0, &cat);
+    if (rc == GDEFSTOR_OK) {
+      rc = stamp_step(c, &cat, 0, 0, "dss_record");
+      if (rc == GDEFSTOR_OK) {
+        rc = stamp_step(c, &cat, 0, 1, "dss_draft");
+      }
+      gdefssql_cat_free(&cat);
+    }
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = stamp_types(c);
   }
   return rc;
 }
@@ -594,6 +620,95 @@ static GDEFSTOR_Result record(GDEFSSQL_Cx * c, uint32_t tno, uint32_t grp,
   return rc;
 }
 
+/* The schema stamp column of @p table, a step from version 1 recorded as
+ * (tno, 0, col, STAMP): added once, nullable, so a row written before it
+ * reads as having no stamp (model.h). */
+static GDEFSTOR_Result stamp_step(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
+    uint32_t tno, uint32_t col, const char * table) {
+  GDEFSSQL_Sb sb;
+  GDEFSTOR_Result rc;
+  if (have(cat, 0, col, GDEFSSQL_ROLE_STAMP) != NULL) {
+    return GDEFSTOR_OK;
+  }
+  gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
+  gdefssql_sb_kw(&sb, "ALTER TABLE ");
+  gdefssql_sb_table(&sb, table);
+  gdefssql_sb_kw(&sb, " ADD COLUMN ");
+  gdefssql_sb_ident(&sb, "stamp");
+  gdefssql_sb_kw(&sb, " ");
+  gdefssql_sb_type(&sb, GDEFSSQL_COL_TEXT);
+  rc = gdefssql_cx_exec(c, &sb);
+  gdefssql_sb_free(&sb);
+  if (rc == GDEFSTOR_OK) {
+    rc = record(c, tno, 0, col, GDEFSSQL_ROLE_STAMP, "stamp", 0);
+  }
+  return rc;
+}
+
+/* The stamp step of every type the store declares, for a store that held
+ * types before the step existed. */
+static GDEFSTOR_Result stamp_types(GDEFSSQL_Cx * c) {
+  GDEFSSQL_Sb sb;
+  GDEFSSQL_St s;
+  uint32_t * tnos = NULL;
+  size_t n = 0;
+  size_t cap = 0;
+  size_t i;
+  int row = 0;
+  GDEFSTOR_Result rc;
+  gdefssql_sb_init(&sb, c->b->alloc, &c->b->d, c->qual);
+  gdefssql_sb_kw(&sb, "SELECT ");
+  gdefssql_sb_col(&sb, "a0", "tno");
+  gdefssql_sb_kw(&sb, " FROM ");
+  gdefssql_sb_table(&sb, "dss_type");
+  gdefssql_sb_kw(&sb, " ");
+  gdefssql_sb_ident(&sb, "a0");
+  gdefssql_sb_kw(&sb, " ORDER BY ");
+  gdefssql_sb_col(&sb, "a0", "tno");
+  rc = gdefssql_st_open(c, &sb, &s);
+  while (rc == GDEFSTOR_OK) {
+    int64_t v = 0;
+    rc = gdefssql_st_step(&s, &row);
+    if (rc != GDEFSTOR_OK || !row) {
+      break;
+    }
+    rc = gdefssql_st_int(&s, 0, &v, NULL);
+    if (rc == GDEFSTOR_OK && (v <= 0 || v > (int64_t)UINT32_MAX)) {
+      rc = GDEFSTOR_ERR_CORRUPT;
+    }
+    if (rc == GDEFSTOR_OK && n == cap) {
+      size_t grown = cap == 0 ? 16 : cap * 2;
+      uint32_t * next = (uint32_t *)gcu_allocator_realloc(c->b->alloc, tnos,
+          grown * sizeof *next);
+      if (next == NULL) {
+        rc = GDEFSTOR_ERR_OOM;
+      } else {
+        tnos = next;
+        cap = grown;
+      }
+    }
+    if (rc == GDEFSTOR_OK) {
+      tnos[n++] = (uint32_t)v;
+    }
+  }
+  gdefssql_st_close(&s);
+  gdefssql_sb_free(&sb);
+  for (i = 0; rc == GDEFSTOR_OK && i < n; i++) {
+    GDEFSSQL_Cat cat;
+    char name[GDEFSSQL_NAME_CAP];
+    rc = gdefssql_cat_load(c, tnos[i], &cat);
+    if (rc == GDEFSTOR_OK) {
+      if (have(&cat, 0, 0, GDEFSSQL_ROLE_REVISION) != NULL) {
+        gdefssql_name_table(name, tnos[i], GDEFSSQL_ROLE_REVISION, 0);
+        rc = stamp_step(c, &cat, tnos[i], 0, name);
+      }
+      gdefssql_cat_free(&cat);
+    }
+  }
+  gcu_allocator_free(c->b->alloc, tnos);
+  return rc;
+}
+
 static GDEFSTOR_Result type_tables(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
     uint32_t tno) {
   static const ColDef e_cols[] = {{"rid", GDEFSSQL_COL_ID, 1},
@@ -635,6 +750,17 @@ static GDEFSTOR_Result type_tables(GDEFSSQL_Cx * c, const GDEFSSQL_Cat * cat,
     if (rc == GDEFSTOR_OK) {
       rc = record(c, tno, 0, 0, t[i].role, name, 0);
     }
+    if (rc != GDEFSTOR_OK) {
+      return rc;
+    }
+  }
+  {
+    /* Every type's revisions carry their schema stamp: the step from
+     * version 1, taken with the table it adds to. */
+    char name[GDEFSSQL_NAME_CAP];
+    GDEFSTOR_Result rc;
+    gdefssql_name_table(name, tno, GDEFSSQL_ROLE_REVISION, 0);
+    rc = stamp_step(c, cat, tno, 0, name);
     if (rc != GDEFSTOR_OK) {
       return rc;
     }

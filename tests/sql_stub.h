@@ -284,7 +284,9 @@ inline bool KnownIdent(const std::string & s) {
       "dss_record", "dss_seq", "dss_outbox", "dss_outbox_id", "dss_w", "ns",
       "rkey", "last", "kept", "stream", "fmt", "lease", "fails", "parked",
       /* story S6a2 */
-      "lang", "langs"};
+      "lang", "langs",
+      /* story S11 */
+      "stamp"};
   if (fixed.count(s) != 0) {
     return true;
   }
@@ -2044,7 +2046,7 @@ struct Collected {
     /* The newest revision, when the scan is asked for it. */
     bool have_rev = false;
     GDEFSTOR_ModelRevision rev;
-    std::string who, why, rlangs;
+    std::string who, why, rlangs, rschema;
   };
   std::map<uint64_t, E> ents;
 };
@@ -2116,6 +2118,7 @@ inline GDEFSTOR_Result C_revision(void * ctx, uint64_t row,
   x.why.assign(r->why == nullptr ? "" : r->why, r->why_len);
   x.rlangs.assign(r->languages == nullptr ? "" : r->languages,
       r->languages_len);
+  x.rschema.assign(r->schema == nullptr ? "" : r->schema, r->schema_len);
   return GDEFSTOR_OK;
 }
 
@@ -2175,6 +2178,7 @@ inline GDEFSTOR_Result TeeScan(void * ctx, const char * type, size_t type_len,
       x.rev.who = x.who.data();
       x.rev.why = x.why.data();
       x.rev.languages = x.rlangs.data();
+      x.rev.schema = x.rschema.data();
       rc = visitor->revision(visitor->ctx, x.e.row, &x.rev);
     }
     if (rc != GDEFSTOR_OK) {

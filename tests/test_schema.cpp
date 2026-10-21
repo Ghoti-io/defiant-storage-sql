@@ -88,6 +88,8 @@ TEST_F(Schema, ANestedDeclarationYieldsTheDocumentedTables) {
       "CREATE TABLE IF NOT EXISTS \"t2_s\" (\"rid\" INTEGER NOT NULL, \"seq\" INTEGER NOT NULL, \"pub\" INTEGER NOT NULL, \"del\" INTEGER NOT NULL, \"actor\" TEXT NOT NULL, \"at\" INTEGER NOT NULL, PRIMARY KEY (\"rid\", \"seq\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_r\" (\"rid\" INTEGER NOT NULL, \"rev\" INTEGER NOT NULL, \"cseq\" INTEGER NOT NULL, \"who\" TEXT NOT NULL, \"at\" INTEGER NOT NULL, \"why\" TEXT NOT NULL, \"langs\" TEXT NOT NULL, PRIMARY KEY (\"rid\", \"rev\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_n\" (\"rid\" INTEGER NOT NULL, \"pub\" INTEGER NOT NULL, \"del\" INTEGER NOT NULL, PRIMARY KEY (\"rid\"))",
+      /* The schema stamp of every revision: the step from version 1. */
+      "ALTER TABLE \"t2_r\" ADD COLUMN \"stamp\" TEXT",
       "CREATE TABLE IF NOT EXISTS \"t2_g0\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" INTEGER, \"v3\" TEXT, \"v4\" BLOB, \"v4s\" TEXT, PRIMARY KEY (\"ent\", \"lang\", \"item\", \"vfrom\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_c0\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, \"v1\" INTEGER, \"v2\" INTEGER, \"v3\" TEXT, \"v4\" BLOB, \"v4s\" TEXT, PRIMARY KEY (\"ent\", \"lang\", \"item\"))",
       "CREATE TABLE IF NOT EXISTS \"t2_g1\" (\"ent\" INTEGER NOT NULL, \"lang\" TEXT NOT NULL, \"item\" INTEGER NOT NULL, \"vfrom\" INTEGER NOT NULL, \"vto\" INTEGER, \"parent\" INTEGER NOT NULL, \"ord\" REAL NOT NULL, \"v0\" TEXT, PRIMARY KEY (\"ent\", \"lang\", \"item\", \"vfrom\"))",
@@ -873,6 +875,7 @@ TEST_F(Schema, TheSystemTablesAreRecordedStepsOfTheTenant) {
   Open(sqlstub::StdDialect());
   ASSERT_EQ(GDEFSTOR_OK, InWrite(rig.store, [](GDEFSTOR_Write * w) {
     return gdefstor_record_put(w, "core.m", 6, "k", 1,
+        "test/1", 6,
         reinterpret_cast<const uint8_t *>("v"), 1);
   }));
   const sqlstub::Db & db = rig.engine->stores[kTenant].committed;
@@ -905,6 +908,7 @@ TEST_F(Schema, AnAbortKeepsCounterFloorsThroughTheWritesSavepoint) {
   Open(sqlstub::StdDialect());
   ASSERT_EQ(GDEFSTOR_OK, InWrite(rig.store, [](GDEFSTOR_Write * w) {
     return gdefstor_record_put(w, "core.m", 6, "k", 1,
+        "test/1", 6,
         reinterpret_cast<const uint8_t *>("v"), 1);
   }));
   for (int take = 0; take < 2; take++) {
@@ -913,6 +917,7 @@ TEST_F(Schema, AnAbortKeepsCounterFloorsThroughTheWritesSavepoint) {
     ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(rig.store, kTenant, 2, nullptr,
         &w));
     ASSERT_EQ(GDEFSTOR_OK, gdefstor_record_put(w, "core.m", 6, "k", 1,
+        "test/1", 6,
         reinterpret_cast<const uint8_t *>("x"), 1));
     uint64_t v = 0;
     if (take) {

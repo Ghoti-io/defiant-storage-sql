@@ -42,8 +42,8 @@
  * | `dss_type` | each declaration: its name, its number, its text |
  * | `dss_name` | the mapping from each generated name to what it stores |
  * | `dss_entity` | derived: public id to row and type number |
- * | `dss_draft` | one draft per public id |
- * | `dss_record` | records (story S6a) |
+ * | `dss_draft` | one draft per public id, with its schema stamp |
+ * | `dss_record` | records (story S6a), each with its schema stamp |
  * | `dss_seq` | counters, and each outbox stream's last sequence |
  * | `dss_outbox` | outbox rows, by stream and sequence |
  * | `dss_outbox_id` | each outbox row by public id |
@@ -55,7 +55,7 @@
  * | --- | --- | --- |
  * | `tN_e` | entity: row, public id, creator, created, revision, last item | row |
  * | `tN_s` | state history: row, seq, published, deleted, actor, when | row, seq |
- * | `tN_r` | revisions: row, revision, commit seq, who, when, why | row, revision |
+ * | `tN_r` | revisions: row, revision, commit seq, who, when, why, languages, schema stamp | row, revision |
  * | `tN_gG` | item versions of group G: entity, item, valid_from, valid_to, parent, ord, `vC`... | entity, item, valid_from |
  * | `tN_n` | derived: each entity's newest state | row |
  * | `tN_cG` | derived: the open versions of group G | entity, item |
@@ -76,6 +76,13 @@
  * retyped: a schema step creates a table, adds a nullable column or creates
  * an index, and each is recorded in `dss_name`, so a step already taken is
  * never taken again (documentation/sql.md has every column and index).
+ *
+ * The layout is at version 1, and version 1 is final (AD-34): what a later
+ * layout adds is such a step, taken on a store that may already hold data.
+ * The first is the schema stamp (model.h): the nullable column `stamp` of
+ * `dss_record`, `dss_draft` and every `tN_r`, recorded in `dss_name`. A store
+ * this library made before it takes it the first time a backend reads or
+ * writes the tenant, and the rows it held then read with no stamp.
  *
  * ## Transactions
  *

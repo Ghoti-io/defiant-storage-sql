@@ -248,6 +248,8 @@ inline GDEFSTOR_RevisionMeta Meta() {
   m.when_ms = 1000;
   m.why = "test";
   m.why_len = 4;
+  m.schema = "test/1";
+  m.schema_len = 6;
   return m;
 }
 

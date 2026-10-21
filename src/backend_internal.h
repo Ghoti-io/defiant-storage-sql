@@ -56,6 +56,9 @@ typedef struct GDEFSSQL_Back {
   GDEFSSQL_Dialect d;
   GDEFSSQL_Executor x;
   struct GDEFSSQL_Ready * ready; /* tenants whose six tables are known made */
+  /* tenants whose layout steps a read has taken, before any write here
+   * (backend.c rd_open): their index sweep is still the first write's */
+  struct GDEFSSQL_Ready * laid;
   struct GDEFSSQL_Txn * open;    /* open writes, one per tenant at most */
   /* The write's savepoint, set after BEGIN and rolled back to by an abort
    * that keeps counters (story S6a): built once, so that an abort needs no

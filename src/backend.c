@@ -245,6 +245,76 @@ typedef struct Rd {
   int empty; /* the tenant has no store */
 } Rd;
 
+static Ready * ready_find(Back * b, const char * t, size_t n);
+
+
+/* The layout steps of a tenant's store (gdefssql_tenant_init(): a store an
+ * older layout made gains what a later one adds), in a transaction of their
+ * own on a connection of their own, for a read that comes before this
+ * backend's first write of the tenant. The index sweep stays the first
+ * write's: a read never starts a build. */
+/* Whether this backend has a write open on @p tenant. */
+static int txn_open(const Back * b, const char * tenant, size_t tenant_len) {
+  const Txn * x;
+  for (x = b->open; x != NULL; x = x->next) {
+    if (same(x->tenant, x->tenant_len, tenant, tenant_len)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static GDEFSTOR_Result lay_out(Back * b, const char * tenant,
+    size_t tenant_len) {
+  Cx c;
+  const char * qual = NULL;
+  Ready * r;
+  GDEFSTOR_Result rc;
+  for (r = b->laid; r != NULL; r = r->next) {
+    if (same(r->tenant, r->len, tenant, tenant_len)) {
+      return GDEFSTOR_OK;
+    }
+  }
+  memset(&c, 0, sizeof c);
+  c.b = b;
+  rc = b->x.open(b->x.ctx, tenant, tenant_len, 1, &c.conn, &qual);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  if (c.conn == NULL) {
+    return GDEFSTOR_ERR_INTERNAL;
+  }
+  c.qual = qual;
+  rc = checked_qualifier(b, qual);
+  if (rc == GDEFSTOR_OK) {
+    rc = txn_sql(&c, b->d.begin_write);
+  }
+  if (rc == GDEFSTOR_OK) {
+    rc = gdefssql_tenant_init(&c);
+    if (rc == GDEFSTOR_OK) {
+      rc = txn_sql(&c, b->d.commit);
+    } else {
+      txn_sql(&c, b->d.rollback);
+    }
+  }
+  b->x.close(b->x.ctx, c.conn, c.failed);
+  if (rc != GDEFSTOR_OK) {
+    return rc;
+  }
+  r = (Ready *)gdefssql_mem0(b->alloc, sizeof *r);
+  if (r != NULL) {
+    r->tenant = dup(b->alloc, tenant, tenant_len);
+    r->len = tenant_len;
+    if (r->tenant == NULL) {
+      gcu_allocator_free(b->alloc, r);
+    } else {
+      r->next = b->laid;
+      b->laid = r;
+    }
+  }
+  return GDEFSTOR_OK;
+}
+
 static GDEFSTOR_Result rd_open(Back * b, Txn * x, const char * tenant,
     size_t tenant_len, Rd * r) {
   const char * qual = NULL;
@@ -264,6 +334,26 @@ static GDEFSTOR_Result rd_open(Back * b, Txn * x, const char * tenant,
   if (r->local.conn == NULL) {
     r->empty = 1;
     return GDEFSTOR_OK;
+  }
+  if (ready_find(b, tenant, tenant_len) == NULL && !txn_open(b, tenant,
+          tenant_len)) {
+    /* A store this backend has not written yet (a write open on it has
+     * taken its steps already): the steps a later layout
+     * takes on it (schema.c) come before its first read as well as its
+     * first write, so a read never meets a column a step has still to add. */
+    b->x.close(b->x.ctx, r->local.conn, 0);
+    r->local.conn = NULL;
+    rc = lay_out(b, tenant, tenant_len);
+    if (rc == GDEFSTOR_OK) {
+      rc = b->x.open(b->x.ctx, tenant, tenant_len, 0, &r->local.conn, &qual);
+    }
+    if (rc != GDEFSTOR_OK) {
+      return rc;
+    }
+    if (r->local.conn == NULL) {
+      r->empty = 1;
+      return GDEFSTOR_OK;
+    }
   }
   r->local.qual = qual;
   rc = checked_qualifier(b, qual);
@@ -715,7 +805,7 @@ static GDEFSTOR_Result visit_all_items(Cx * c, uint32_t tno, int truth,
 static GDEFSTOR_Result visit_revisions(Cx * c, uint32_t tno, uint64_t rid,
     const GDEFSTOR_ModelVisitor * visitor) {
   static const char * const cols[] = {"rid", "rev", "cseq", "who", "at",
-      "why", "langs"};
+      "why", "langs", "stamp"};
   char t[GDEFSSQL_NAME_CAP];
   Sb sb;
   St s;
@@ -727,7 +817,7 @@ static GDEFSTOR_Result visit_revisions(Cx * c, uint32_t tno, uint64_t rid,
   }
   sb_open(&sb, c);
   gdefssql_sb_kw(&sb, "SELECT ");
-  for (i = 0; i < 7; i++) {
+  for (i = 0; i < 8; i++) {
     gdefssql_sb_kw(&sb, i == 0 ? "" : ", ");
     gdefssql_sb_col(&sb, "a0", cols[i]);
   }
@@ -772,6 +862,13 @@ static GDEFSTOR_Result visit_revisions(Cx * c, uint32_t tno, uint64_t rid,
       rc = gdefssql_st_bytes(&s, 6, GDEFSSQL_DATUM_TEXT, &p, &n, NULL);
       r.languages = p == NULL ? "" : (const char *)p;
       r.languages_len = n;
+    }
+    if (rc == GDEFSTOR_OK) {
+      /* NULL for a row written before the step that added the column. */
+      int none = 0;
+      rc = gdefssql_st_bytes(&s, 7, GDEFSSQL_DATUM_TEXT, &p, &n, &none);
+      r.schema = p == NULL ? "" : (const char *)p;
+      r.schema_len = n;
     }
     if (rc == GDEFSTOR_OK && (v[0] <= 0 || v[1] <= 0 || v[2] <= 0)) {
       rc = GDEFSTOR_ERR_CORRUPT;
@@ -1848,7 +1945,7 @@ static GDEFSTOR_Result apply_revision(void * ctx, void * txn,
   }
   gdefssql_cat_free(&cat);
   if (rc == GDEFSTOR_OK) {
-    Kv kv[7];
+    Kv kv[8];
     kv[0].col = "rid";
     kv[0].v = dint((int64_t)a->row);
     kv[1].col = "rev";
@@ -1863,8 +1960,10 @@ static GDEFSTOR_Result apply_revision(void * ctx, void * txn,
     kv[5].v = dbytes(GDEFSSQL_DATUM_TEXT, r->why, r->why_len);
     kv[6].col = "langs";
     kv[6].v = dbytes(GDEFSSQL_DATUM_TEXT, r->languages, r->languages_len);
+    kv[7].col = "stamp";
+    kv[7].v = dbytes(GDEFSSQL_DATUM_TEXT, r->schema, r->schema_len);
     gdefssql_name_table(t, tno, GDEFSSQL_ROLE_REVISION, 0);
-    rc = insert(&x->cx, t, kv, 7);
+    rc = insert(&x->cx, t, kv, 8);
   }
   if (rc == GDEFSTOR_OK) {
     Sb sb;
@@ -2033,7 +2132,7 @@ static GDEFSTOR_Result m_languages(void * ctx, void * txn, const char * tenant,
 static GDEFSTOR_Result m_draft_put(void * ctx, void * txn,
     const GDEFSTOR_ModelDraft * d) {
   Txn * x = (Txn *)txn;
-  Kv kv[4];
+  Kv kv[5];
   (void)ctx;
   if (x == NULL || d == NULL || d->public_id == NULL || d->type == NULL ||
       (d->json == NULL && d->json_len != 0) || !fits(d->base_revision)) {
@@ -2047,7 +2146,9 @@ static GDEFSTOR_Result m_draft_put(void * ctx, void * txn,
   kv[2].v = dint((int64_t)d->base_revision);
   kv[3].col = "body";
   kv[3].v = dbytes(GDEFSSQL_DATUM_BYTES, d->json, d->json_len);
-  return upsert(&x->cx, "dss_draft", kv, 4, 1);
+  kv[4].col = "stamp";
+  kv[4].v = dbytes(GDEFSSQL_DATUM_TEXT, d->schema, d->schema_len);
+  return upsert(&x->cx, "dss_draft", kv, 5, 1);
 }
 
 /* Visit drafts: one public id, or (NULL) all. *out_seen counts them. */
@@ -2067,6 +2168,8 @@ static GDEFSTOR_Result visit_drafts(Cx * c, const char * pid, size_t pid_len,
   gdefssql_sb_col(&sb, "a0", "base");
   gdefssql_sb_kw(&sb, ", ");
   gdefssql_sb_col(&sb, "a0", "body");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "stamp");
   from(&sb, "dss_draft");
   if (pid != NULL) {
     GDEFSSQL_Datum v = dbytes(GDEFSSQL_DATUM_TEXT, pid, pid_len);
@@ -2103,6 +2206,12 @@ static GDEFSTOR_Result visit_drafts(Cx * c, const char * pid, size_t pid_len,
     if (rc == GDEFSTOR_OK) {
       rc = gdefssql_st_bytes(&s, 3, GDEFSSQL_DATUM_BYTES, &d.json, &d.json_len,
           NULL);
+    }
+    if (rc == GDEFSTOR_OK) {
+      int none = 0;
+      rc = gdefssql_st_bytes(&s, 4, GDEFSSQL_DATUM_TEXT, &p, &n, &none);
+      d.schema = p == NULL ? "" : (const char *)p;
+      d.schema_len = n;
     }
     if (rc == GDEFSTOR_OK && visitor->draft != NULL) {
       rc = visitor->draft(visitor->ctx, &d);
@@ -3382,7 +3491,7 @@ static GDEFSTOR_Result m_counter_get(void * ctx, const char * tenant,
 static GDEFSTOR_Result m_record_put(void * ctx, void * txn,
     const GDEFSTOR_ModelRecord * r) {
   Txn * x = (Txn *)txn;
-  Kv kv[3];
+  Kv kv[4];
   (void)ctx;
   if (x == NULL || r == NULL || r->ns == NULL || r->key == NULL ||
       (r->bytes == NULL && r->len != 0)) {
@@ -3394,7 +3503,9 @@ static GDEFSTOR_Result m_record_put(void * ctx, void * txn,
   kv[1].v = dbytes(GDEFSSQL_DATUM_TEXT, r->key, r->key_len);
   kv[2].col = "body";
   kv[2].v = dbytes(GDEFSSQL_DATUM_BYTES, r->bytes, r->len);
-  return upsert(&x->cx, "dss_record", kv, 3, 2);
+  kv[3].col = "stamp";
+  kv[3].v = dbytes(GDEFSSQL_DATUM_TEXT, r->schema, r->schema_len);
+  return upsert(&x->cx, "dss_record", kv, 4, 2);
 }
 
 /* SELECT the body of record (ns, key); *out_found 0 when none, else the
@@ -3408,6 +3519,8 @@ static GDEFSTOR_Result record_open(Cx * c, Sb * sb, St * s, const char * ns,
   sb_open(sb, c);
   gdefssql_sb_kw(sb, "SELECT ");
   gdefssql_sb_col(sb, "a0", "body");
+  gdefssql_sb_kw(sb, ", ");
+  gdefssql_sb_col(sb, "a0", "stamp");
   from(sb, "dss_record");
   where_eq(sb, " WHERE ", "ns", &n);
   where_eq(sb, " AND ", "rkey", &k);
@@ -3476,6 +3589,13 @@ static GDEFSTOR_Result m_record_get(void * ctx, void * txn,
     rc = gdefssql_st_bytes(&s, 0, GDEFSSQL_DATUM_BYTES, &out.bytes, &out.len,
         NULL);
     if (rc == GDEFSTOR_OK) {
+      const uint8_t * p = NULL;
+      int none = 0;
+      rc = gdefssql_st_bytes(&s, 1, GDEFSSQL_DATUM_TEXT, &p, &out.schema_len,
+          &none);
+      out.schema = p == NULL ? "" : (const char *)p;
+    }
+    if (rc == GDEFSTOR_OK) {
       rc = visitor->record(visitor->ctx, &out);
     }
   }
@@ -3520,6 +3640,8 @@ static GDEFSTOR_Result visit_records(Cx * c, const char * ns, size_t ns_len,
   gdefssql_sb_col(&sb, "a0", "rkey");
   gdefssql_sb_kw(&sb, ", ");
   gdefssql_sb_col(&sb, "a0", "body");
+  gdefssql_sb_kw(&sb, ", ");
+  gdefssql_sb_col(&sb, "a0", "stamp");
   from(&sb, "dss_record");
   if (ns != NULL) {
     where_eq(&sb, " WHERE ", "ns", &n);
@@ -3565,6 +3687,12 @@ static GDEFSTOR_Result visit_records(Cx * c, const char * ns, size_t ns_len,
     if (rc == GDEFSTOR_OK) {
       rc = gdefssql_st_bytes(&s, 2, GDEFSSQL_DATUM_BYTES, &out.bytes,
           &out.len, NULL);
+    }
+    if (rc == GDEFSTOR_OK) {
+      int none = 0;
+      rc = gdefssql_st_bytes(&s, 3, GDEFSSQL_DATUM_TEXT, &p, &len, &none);
+      out.schema = p == NULL ? "" : (const char *)p;
+      out.schema_len = len;
     }
     if (rc == GDEFSTOR_OK) {
       rc = visitor->record(visitor->ctx, &out);
@@ -4256,6 +4384,12 @@ static void m_destroy(void * ctx) {
   while (b->ready != NULL) {
     Ready * r = b->ready;
     b->ready = r->next;
+    gcu_allocator_free(b->alloc, r->tenant);
+    gcu_allocator_free(b->alloc, r);
+  }
+  while (b->laid != NULL) {
+    Ready * r = b->laid;
+    b->laid = r->next;
     gcu_allocator_free(b->alloc, r->tenant);
     gcu_allocator_free(b->alloc, r);
   }
