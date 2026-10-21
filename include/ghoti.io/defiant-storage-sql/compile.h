@@ -55,10 +55,9 @@
  * - the total is a `COUNT(*)` of the same predicate, with no page; the page
  *   is `LIMIT ? OFFSET ?`, every match being INT64_MAX.
  *
- * Anything else is refused with ::GDEFSSQL_ERR_UNSUPPORTED: a COLUMN or
- * CONST operand (the projection form), a select, a numeric sort or entity
- * tiebreak, a personal or group field, a node or flag this compiler does not
- * know. A statement that would need more parameters than the dialect allows
+ * Anything else is refused with ::GDEFSSQL_ERR_UNSUPPORTED: a CONST operand
+ * outside blind equality, a personal or group field, a node or flag this
+ * compiler does not know. A statement that would need more parameters than the dialect allows
  * is ::GDEFSSQL_ERR_LIMIT. Nothing is ever answered differently.
  */
 

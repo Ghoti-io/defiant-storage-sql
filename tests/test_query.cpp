@@ -402,33 +402,11 @@ TEST_F(Compile, RefusesWhatIsOutsideTheForm) {
     std::function<void(Q &, GDEFSTOR_Query &)> make;
   };
   const std::vector<Case> cases = {
-      {"a projection column", [](Q & b, GDEFSTOR_Query & q) {
-         GDEFSTOR_QueryOperand o;
-         std::memset(&o, 0, sizeof o);
-         o.kind = GDEFSTOR_QUERY_COLUMN;
-         o.column = "number";
-         o.column_len = 6;
-         q.where = b.Cmp(GDEFSTOR_QUERY_EQ, o, b.Vals({Txt("a")}));
-       }},
       {"a text constant", [](Q & b, GDEFSTOR_Query & q) {
          GDEFSTOR_QueryOperand o;
          std::memset(&o, 0, sizeof o);
          o.kind = GDEFSTOR_QUERY_CONST;
          q.where = b.Cmp(GDEFSTOR_QUERY_EQ, b.FieldOp("number"), o);
-       }},
-      {"a select", [](Q & b, GDEFSTOR_Query & q) {
-         static GDEFSTOR_QueryOperand sel;
-         sel = b.FieldOp("number");
-         q.select = &sel;
-         q.select_count = 1;
-       }},
-      {"a numeric tiebreak", [](Q &, GDEFSTOR_Query & q) { q.entity_numeric = 1; }},
-      {"a numeric sort", [](Q & b, GDEFSTOR_Query & q) {
-         static GDEFSTOR_QuerySort s;
-         s = Sort(b.FieldOp("number"), 0);
-         s.numeric = 1;
-         q.sorts = &s;
-         q.sort_count = 1;
        }},
       {"a sort on a multiple", [](Q & b, GDEFSTOR_Query & q) {
          static GDEFSTOR_QuerySort s;

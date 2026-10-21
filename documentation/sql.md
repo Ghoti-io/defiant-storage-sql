@@ -326,8 +326,8 @@ selects keys cannot be UNKNOWN, nor can `EXISTS`, and the one nullable fact
 absent value adds nothing to the port's set.
 
 Refused with `GDEFSSQL_ERR_UNSUPPORTED` (through the backend,
-`GDEFSTOR_ERR_UNSUPPORTED`): COLUMN and CONST operands, a select, a numeric
-sort or tiebreak, more than four sort keys, a sort on anything but a single
+`GDEFSTOR_ERR_UNSUPPORTED`): a CONST operand outside BLIND, more than four
+sort keys, a sort on anything but a single
 field of the root group (or, with `FIRST`, a multiple scalar one), a fact or
 the public id, a personal (outside BLIND),
 retired or group field, an EXISTS inside an EXISTS, an OUTER operand outside one, an unknown

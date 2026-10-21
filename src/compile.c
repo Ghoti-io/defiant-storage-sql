@@ -269,7 +269,8 @@ static void resolve_kind(Qc * q, const GDEFSTOR_QueryOperand * o,
     out->type = GDEFSTOR_FIELD_REFERENCE;
     return;
   default:
-    /* COLUMN and CONST are the projection form's. */
+    /* A CONST is a blind MAC's alone (blind_node()); any other kind is not
+     * an operand of this form. */
     refuse(q, GDEFSTOR_ERR_UNSUPPORTED);
     return;
   }
@@ -944,9 +945,8 @@ static void sort_key(Qc * q, const GDEFSTOR_QuerySort * s, const Scope * main,
   int first = (o->flags & GDEFSTOR_QUERY_FIRST) != 0;
   int empty = (o->flags & GDEFSTOR_QUERY_EMPTY_IF_NONE) != 0;
   *nullable = 0;
-  if (s->numeric != 0 ||
-      (o->flags & ~(GDEFSTOR_QUERY_FIRST | GDEFSTOR_QUERY_EMPTY_IF_NONE)) !=
-          0) {
+  if ((o->flags & ~(GDEFSTOR_QUERY_FIRST | GDEFSTOR_QUERY_EMPTY_IF_NONE)) !=
+      0) {
     refuse(q, GDEFSTOR_ERR_UNSUPPORTED);
     return;
   }
@@ -1098,8 +1098,7 @@ GDEFSTOR_Result gdefssql_compile_plan(const GDEFSSQL_Dialect * d,
     return GDEFSTOR_ERR_INVALID;
   }
   query = plan->query;
-  if (query->select_count != 0 || query->entity_numeric != 0 ||
-      query->sort_count > GDEFSTOR_QUERY_MAX_SORTS ||
+  if (query->sort_count > GDEFSTOR_QUERY_MAX_SORTS ||
       (query->sorts == NULL && query->sort_count != 0)) {
     return GDEFSTOR_ERR_UNSUPPORTED;
   }
