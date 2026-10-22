@@ -40,12 +40,20 @@
 #include "sql_stub.h"
 
 #include <map>
+#include <mutex>
 
 namespace conformance_rig {
 
 inline std::map<GDEFSTOR_Store *, sqlstub::Rig *> & Rigs() {
   static std::map<GDEFSTOR_Store *, sqlstub::Rig *> rigs;
   return rigs;
+}
+
+/* The allocation-failure sweeps open and close stores from several threads at
+ * once (model.inc), so the table of open stores is locked. */
+inline std::mutex & RigsLock() {
+  static std::mutex m;
+  return m;
 }
 
 }  // namespace conformance_rig
@@ -63,19 +71,28 @@ extern "C" GDEFSTOR_Result ModelOpen(GDEFSTOR_Store ** out,
     delete r;
     return rc;
   }
-  conformance_rig::Rigs()[r->store] = r;
+  {
+    std::lock_guard<std::mutex> hold(conformance_rig::RigsLock());
+    conformance_rig::Rigs()[r->store] = r;
+  }
   *out = r->store;
   return GDEFSTOR_OK;
 }
 
 extern "C" void ModelClose(GDEFSTOR_Store * store) {
-  auto it = conformance_rig::Rigs().find(store);
+  sqlstub::Rig * r = nullptr;
+  {
+    std::lock_guard<std::mutex> hold(conformance_rig::RigsLock());
+    auto it = conformance_rig::Rigs().find(store);
+    if (it != conformance_rig::Rigs().end()) {
+      r = it->second;
+      conformance_rig::Rigs().erase(it);
+    }
+  }
   gdefstor_store_destroy(store);
-  if (it == conformance_rig::Rigs().end()) {
+  if (r == nullptr) {
     return;
   }
-  sqlstub::Rig * r = it->second;
-  conformance_rig::Rigs().erase(it);
   EXPECT_EQ(0, r->engine->open_conns) << "a connection was left open";
   EXPECT_EQ(0, r->engine->open_stmts) << "a statement was left open";
   delete r;
