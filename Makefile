@@ -831,8 +831,17 @@ check-aliasing: ## Fail if the strict-aliasing warning is not actually armed
 		printf '\033[0;31mcheck-aliasing: CFLAGS resolves to -Wstrict-aliasing=%s, and only level 1 reports the planted store - 0, 2 and 3 are all silent on it. The level is wrong; the flags are not missing. Note that 3 is also what -Wall implies, so it means either an explicit override later on the command line or ALIASING flags that stopped being passed, and this cannot tell which.\033[0m\n' "$$level" >&2; \
 	fi; \
 	exit 1
+# The paths this Makefile bakes into objects, handed to the copy a plant builds
+# in, so the copy compiles with the same flags as this tree and keeps its
+# objects (plant-lib.sh). Left to default they would name the copy's own
+# directory, the flags stamp would differ, and every plant would recompile the
+# library. The helpers are defiant-storage's, installed with its conformance
+# suites.
+PLANT_PATHS = TEST_DATA=$(TEST_DATA)
+PLANT_LIB = $(STOR_CONFORMANCE)/plant-lib.sh
+
 check-sql: ## Fail unless each defect planted in the SQL layer turns a named test red
-	@tools/check-sql.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) STOR_PC=$(STOR_PC)
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-sql.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) STOR_PC=$(STOR_PC) $(PLANT_PATHS)
 
 check-labels: ## Fail if a public header lacks exactly one @stability free label
 	@tools/check-labels.sh .
@@ -910,6 +919,11 @@ ifeq ($(OS_NAME), Linux)
 else
 	@printf "check-symbols: skipped (Linux only)\n"
 endif
+
+# A gate copies the finished build into its scratch tree (plant-lib.sh), so
+# under make -j no gate may start before the library and every test
+# executable are linked.
+$(TEST_GATES): | $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES)
 
 test: ## Make and run the unit tests
 test: $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES) $(TEST_GATES)

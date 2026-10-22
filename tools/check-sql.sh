@@ -5,7 +5,7 @@
 # Show that each defect planted in the SQL layer turns a named test red: the
 # defects a shared schema generator and query compiler can commit, which the
 # tests exist to catch. Each plant edits a scratch copy of the real source
-# (tools/plant-lib.sh), so nothing in src/ selects a defect.
+# (defiant-storage's plant-lib.sh), so nothing in src/ selects a defect.
 #
 # Usage: check-sql.sh <make> <build-dir> [make args]
 
@@ -15,7 +15,15 @@ MAKE="${1:?usage: check-sql.sh <make> <build-dir> [make args]}"
 BUILD_DIR="${2:?usage: check-sql.sh <make> <build-dir> [make args]}"
 shift 2
 
-. tools/plant-lib.sh
+# The helpers are defiant-storage's, installed with its conformance suites;
+# the Makefile names the file.
+PLANT_LIB="${GHOTI_PLANT_LIB:-}"
+if [ ! -r "$PLANT_LIB" ]; then
+  printf '%s: defiant-storage installs the plant helpers (plant-lib.sh) with its conformance suites and none was found at "%s": install defiant-storage first, then run this through make (GHOTI_PLANT_LIB names the file)\n' \
+    "$(basename "$0")" "$PLANT_LIB" >&2
+  exit 1
+fi
+. "$PLANT_LIB"
 plant_setup "$MAKE" "$BUILD_DIR" "$@"
 plant_control testSchema 'Schema.*'
 plant_control testQuery 'Compile.*'
@@ -396,5 +404,15 @@ plant revision-who-is-the-creator src/compile.c testConformance \
       out->alias = s->e;
       out->column = "creator";
       out->type = GDEFSTOR_FIELD_REFERENCE;'
+
+# The stale-object plant. A plant's copy starts from the finished build, so the
+# edit has to be compiled into it; this one is made not to be (the object that
+# depends on the edit is left looking up to date), and the gate has to refuse it
+# as a STALE OBJECT. If it ever passes instead, a warm copy could pass with the
+# defect never built in.
+plant_stale stale-object src/compile.c testAgreement \
+  'Agreement.RandomQueriesMatchTheReferenceScan' \
+  '      int want_first = !s->descending;' \
+  '      int want_first = s->descending;'
 
 plant_finish
