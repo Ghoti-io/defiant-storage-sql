@@ -28,6 +28,7 @@
 
 #include <gtest/gtest.h>
 
+#include "size_structs.h"
 #include "test_util.h"
 
 #include <random>
@@ -967,6 +968,32 @@ TEST(Dialect, ABackendNeedsACompleteExecutor) {
   x = sqlstub::ExecutorOf(&e);
   d.ddl_transactional = 0;
   EXPECT_EQ(GDEFSSQL_ERR_UNSUPPORTED, gdefssql_model_backend(&d, &x, nullptr, &out));
+}
+
+/* AD-34: a struct with a size member is accepted at exactly its own size. The
+ * two here are the dialect an engine is described by and the executor it is
+ * driven through (size_structs.h lists every struct). */
+TEST(Dialect, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  const std::map<std::string, size_structs::Probe> probes = {
+      {"GDEFSSQL_Dialect", [&](size_t size) {
+         GDEFSSQL_Dialect d = sqlstub::StdDialect();
+         d.size = size;
+         return gdefssql_dialect_check(&d) == GDEFSSQL_OK;
+       }},
+      {"GDEFSSQL_Executor", [&](size_t size) {
+         GDEFSSQL_Dialect d = sqlstub::StdDialect();
+         sqlstub::Engine e(d);
+         GDEFSSQL_Executor x = sqlstub::ExecutorOf(&e);
+         x.size = size;
+         GDEFSTOR_ModelBackend out;
+         GDEFSSQL_Result rc = gdefssql_model_backend(&d, &x, nullptr, &out);
+         if (rc == GDEFSSQL_OK) {
+           out.destroy(out.ctx);
+         }
+         return rc == GDEFSSQL_OK;
+       }},
+  };
+  size_structs::Run(size_structs::Sql(), "tests/test_schema.cpp", probes);
 }
 
 }  // namespace

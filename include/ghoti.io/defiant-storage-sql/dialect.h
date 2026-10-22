@@ -94,8 +94,9 @@ typedef enum GDEFSSQL_Upsert {
 } GDEFSSQL_Upsert;
 
 /**
- * @brief One engine's dialect. Size-prefixed; every string is the engine's
- * own and is copied into statements verbatim.
+ * @brief One engine's dialect. Its @ref size must be
+ * `sizeof(GDEFSSQL_Dialect)`; every string is the engine's own and is copied
+ * into statements verbatim.
  *
  * The strings must outlive every backend made with the dialect (a backend
  * copies the struct, not the strings).
